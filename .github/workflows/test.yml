@@ -11,18 +11,18 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: purcell/setup-emacs@34c6ded44899fd1bf74d2889558befd1750e61a7
         with:
           version: snapshot
       - name: Check out yaml.el
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: zkry/yaml.el
           ref: 5546f36bde24a9a8c1934e0f6ce205cd41d72537
           path: .deps/yaml.el
       - name: Check out firefox-cookies.el
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: DzmingLi/firefox-cookies.el
           ref: fab3f48837c96d3925c024fb2ad9a400ab54df76
