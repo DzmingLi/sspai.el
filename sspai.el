@@ -5,7 +5,7 @@
 ;; Author: Dzming Li <i@dzming.li>
 ;; Maintainer: Dzming Li <i@dzming.li>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "29.1") (yaml "1.2.4") (firefox-cookies "0.1.0"))
+;; Package-Requires: ((emacs "31.1") (yaml "1.2.4") (firefox-cookies "0.1.0"))
 ;; Keywords: convenience, hypermedia, tools
 ;; URL: https://github.com/DzmingLi/sspai.el
 ;; SPDX-License-Identifier: GPL-3.0-or-later

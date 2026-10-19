@@ -5,8 +5,8 @@
 
 ## 安装
 
-Emacs 29.1 起可以使用内置的 `package-vc-install` 安装。依次安装依赖
-和本包：
+本包只面向最新版 Emacs，不维护旧版本兼容；当前最低版本声明为 31.1。
+使用内置的 `package-vc-install` 依次安装依赖和本包：
 
 ```elisp
 (require 'package-vc)
@@ -37,7 +37,7 @@ Emacs 29.1 起可以使用内置的 `package-vc-install` 安装。依次安装�
 
 ## 依赖
 
-- Emacs 29.1 或更高版本
+- 最新版 Emacs（当前版本声明为 31.1）
 - [yaml.el](https://github.com/zkry/yaml.el) 1.2.4 或更高版本
 - [firefox-cookies.el](https://github.com/DzmingLi/firefox-cookies.el) 0.1.0 或更高版本
 - [Pandoc](https://pandoc.org/)（发布与导入正文时用于 Markdown/Org 和
@@ -247,7 +247,7 @@ make check EMACSFLAGS='--batch -Q' \
 ```
 
 `make check` 会运行离线 ERT 测试，并将字节编译警告视为错误。
-GitHub Actions 会在 Emacs 29.1 和 30.2 上运行相同检查。
+GitHub Actions 跟随 Emacs 最新开发版（snapshot）运行相同检查。
 
 ## 许可
 

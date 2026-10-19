@@ -10,15 +10,11 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        emacs-version: ['29.1', '30.2']
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: purcell/setup-emacs@34c6ded44899fd1bf74d2889558befd1750e61a7
         with:
-          version: ${{ matrix.emacs-version }}
+          version: snapshot
       - name: Check out yaml.el
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
