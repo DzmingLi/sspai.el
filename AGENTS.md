@@ -4,7 +4,8 @@
   for older Emacs releases.
 - CI follows the latest Emacs development snapshot. Keep the package's minimum
   Emacs version aligned with the current development baseline (currently 31.1).
-- Local Org or Markdown files are authoritative. Publication pushes local
+- Only Org mode source files are supported; do not add Markdown/YAML support.
+- Local Org files are authoritative. Publication pushes local
   content; do not add bidirectional synchronization or remote conflict checks.
 - Keep source metadata minimal. Do not persist values that can be derived from
   the article ID or package configuration.

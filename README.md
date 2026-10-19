@@ -1,7 +1,7 @@
 # sspai.el
 
-在 Emacs 里撰写、保存与发布少数派文章，以本地稿件为准。支持 Markdown
-与 Org 源稿，通过 `firefox-cookies.el` 使用 Firefox 中已有的登录状态。
+在 Emacs 里撰写、保存与发布少数派文章，以本地稿件为准。仅支持 Org
+源稿，通过 `firefox-cookies.el` 使用 Firefox 中已有的登录状态。
 
 ## 安装
 
@@ -10,7 +10,6 @@
 
 ```elisp
 (require 'package-vc)
-(package-vc-install "https://github.com/zkry/yaml.el")
 (package-vc-install "https://github.com/DzmingLi/firefox-cookies.el")
 (package-vc-install "https://github.com/DzmingLi/sspai.el")
 ```
@@ -27,7 +26,7 @@
 
 ## 功能
 
-- 新建 Markdown 或 Org 稿件
+- 新建 Org 稿件
 - 保存草稿、直接发布到 Matrix 社区、提交少数派审核
 - 把已有文章导入新文件，之后以本地稿件为准单向更新远端
 - 上传正文图片与题图，并缓存已上传图片
@@ -38,9 +37,8 @@
 ## 依赖
 
 - 最新版 Emacs（当前版本声明为 31.1）
-- [yaml.el](https://github.com/zkry/yaml.el) 1.2.4 或更高版本
 - [firefox-cookies.el](https://github.com/DzmingLi/firefox-cookies.el) 0.1.0 或更高版本
-- [Pandoc](https://pandoc.org/)（发布与导入正文时用于 Markdown/Org 和
+- [Pandoc](https://pandoc.org/)（发布与导入正文时用于 Org 和
   HTML 之间的转换）
 
 将仓库加入 `load-path`，然后：
@@ -97,7 +95,7 @@ API base，不会发送到七牛域名。
 M-x sspai-new-article
 ```
 
-选择 `.md`、`.markdown` 或 `.org` 文件后开始写作。常用命令：
+选择 `.org` 文件后开始写作。常用命令：
 
 | 命令 | 行为 |
 | --- | --- |
@@ -125,24 +123,6 @@ M-x sspai-new-article
 
 ## 稿件格式
 
-### Markdown
-
-```markdown
----
-title: "示例文章"
-banner: "./images/banner.png"
-tags:
-  - Emacs
-  - 效率
-sspai:
-  status: "draft"
----
-
-正文从这里开始。
-```
-
-### Org
-
 ```org
 #+TITLE: 示例文章
 #+BANNER: ./images/banner.png
@@ -154,35 +134,26 @@ sspai:
 
 ### 通用题图字段
 
-题图属于文章本身，而不属于某个平台的命名空间：
-
-- Markdown 只认顶层 `banner`
-- Org 只认 `#+BANNER`
-
-旧的顶层 `cover` / `#+COVER`，以及 `zhihu.banner`、`sspai.banner`、
-`#+ZHIHU_BANNER` 或 `#+SSPAI_BANNER` 都不会作为题图读取，也没有旧字段
-兼容层。同一份源稿因而可以由知乎与少数派适配器共享题图，各适配器只
-负责各自的上传结果和远端 ID。
-
-少数派的发布状态和图片上传缓存保存在 Markdown 的 `sspai` mapping 或 Org 的
-`#+SSPAI_*` 关键字中。写回检查点时，其他顶层 YAML 字段、Org 关键字与
-正文都会保留。
+使用 Org 关键字 `#+TITLE`、`#+BANNER` 和 `#+FILETAGS` 描述文章。
+少数派的发布状态和图片上传缓存保存在 `#+SSPAI_*` 关键字中。
+写回发布结果时，会保留其他 Org 关键字和本地正文。
 
 适合手动设置的少数派字段有：
 
-| Markdown `sspai` 键 | Org 关键字 | 含义 |
-| --- | --- | --- |
-| `status` | `#+SSPAI_STATUS` | `draft`、`published` 或 `audit` |
-| `allow-comment` | `#+SSPAI_ALLOW_COMMENT` | 是否允许评论，省略时默认 `true`；关闭时显式写 `false` |
-| `benefits-statement-on` | `#+SSPAI_BENEFITS_STATEMENT_ON` | 是否启用利益相关声明 |
-| `benefits-statement-id` | `#+SSPAI_BENEFITS_STATEMENT_ID` | 已有声明的数字 ID |
+| Org 关键字 | 含义 |
+| --- | --- |
+| `#+SSPAI_STATUS` | `draft`、`published` 或 `audit` |
+| `#+SSPAI_ALLOW_COMMENT` | 是否允许评论，省略时默认 `true`；关闭时显式写 `false` |
+| `#+SSPAI_BENEFITS_STATEMENT_ON` | 是否启用利益相关声明 |
+| `#+SSPAI_BENEFITS_STATEMENT_ID` | 已有声明的数字 ID |
 
-文章链接由 `id` 和站点地址自动推导，源稿不保存 URL 字段。
+文章链接由 `SSPAI_ID` 和站点地址自动推导，源稿不保存 URL 字段。
 
-`id`、`banner-id`、`banner-key`、`banner-hash` 和上传缓存由客户端维护，
-不建议手改。稿件不保存 `BASE_HASH` 或 `SOURCE_HASH`。
+`SSPAI_ID`、`SSPAI_BANNER_ID`、`SSPAI_BANNER_KEY`、`SSPAI_BANNER_HASH`
+和图片上传缓存由客户端维护，不建议手改。稿件不保存 `BASE_HASH` 或
+`SOURCE_HASH`。
 
-源稿中的 `tags` / `#+FILETAGS` 是字符串列表。更新已有文章时，名称匹配的
+`#+FILETAGS: :Emacs:效率:` 定义文章标签。更新已有文章时，名称匹配的
 少数派官方标签会保留服务端返回的完整标签对象与 ID；其余名称作为
 `custom_tags` 发送。新稿无法凭名称伪造官方标签 ID，因此默认都作为自定义
 标签。
@@ -243,7 +214,7 @@ make check
 
 ```sh
 make check EMACSFLAGS='--batch -Q' \
-  ELISP_PATH='/path/to/yaml.el /path/to/firefox-cookies.el'
+  ELISP_PATH='/path/to/firefox-cookies.el'
 ```
 
 `make check` 会运行离线 ERT 测试，并将字节编译警告视为错误。

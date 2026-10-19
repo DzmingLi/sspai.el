@@ -5,7 +5,7 @@
 ;; Author: Dzming Li <i@dzming.li>
 ;; Maintainer: Dzming Li <i@dzming.li>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "31.1") (yaml "1.2.4") (firefox-cookies "0.1.0"))
+;; Package-Requires: ((emacs "31.1") (firefox-cookies "0.1.0"))
 ;; Keywords: convenience, hypermedia, tools
 ;; URL: https://github.com/DzmingLi/sspai.el
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -27,27 +27,20 @@
 
 ;;; Commentary:
 
-;; Write SSPAI articles in Markdown or Org, upload local body images and the
+;; Write SSPAI articles in Org mode, upload local body images and the
 ;; document's generic `banner' image, save drafts, publish to the community,
 ;; submit for editorial review, and update existing articles from local sources.
 ;;
-;; This client targets SSPAI's Matrix editor API.  It deliberately
-;; keeps the account Bearer token, per-article token, and Qiniu upload token
-;; separate.  Account credentials are read through `firefox-cookies' by default
-;; and are never written into a source document.
+;; Use `firefox-cookies' to read the explicitly configured Firefox login.
+;; Account Bearer, article editing, and Qiniu upload tokens stay in memory;
+;; credentials are never written into source files.
 ;;
-;; Markdown metadata:
+;;   #+TITLE: Example
+;;   #+BANNER: ./banner.png
+;;   #+FILETAGS: :Emacs:
+;;   #+SSPAI_STATUS: draft
 ;;
-;;   ---
-;;   title: "Example"
-;;   banner: "./banner.png"
-;;   tags: ["Emacs", "效率"]
-;;   sspai:
-;;     status: "draft"
-;;   ---
-;;
-;; Org uses #+TITLE, the platform-neutral #+BANNER and #+FILETAGS, plus
-;; #+SSPAI_* keywords for publication state and image upload metadata.
+;; Local Org files are authoritative.  Publication only pushes local content.
 
 ;;; Code:
 
@@ -65,7 +58,6 @@
 (require 'url-parse)
 (require 'url-util)
 (require 'xml)
-(require 'yaml)
 
 (defgroup sspai nil
   "Write and publish local SSPAI articles."
@@ -218,7 +210,7 @@ The article title occupies the page's h1, so source h1 headings become h2."
 ;;;; Generic value helpers
 
 (defun sspai--object-get (object key)
-  "Return KEY from JSON/YAML OBJECT represented as an alist or hash table."
+  "Return KEY from JSON OBJECT represented as an alist or hash table."
   (cond
    ((hash-table-p object)
     (let ((value (gethash key object sspai--missing)))
@@ -303,10 +295,6 @@ When ALLOW-ZERO is nil, require a positive integer."
 (defun sspai--bool-json (value)
   "Return VALUE in the representation expected by `json-serialize'."
   (if value t :json-false))
-
-(defun sspai--yaml-string (value)
-  "Quote VALUE as a JSON string, which is also a valid YAML scalar."
-  (json-serialize (or value "")))
 
 (defun sspai--trim-body (body)
   "Normalize BODY line endings and its final newline.
@@ -648,12 +636,11 @@ secrets that must not appear in a transport error."
 
 ;;;; Source metadata
 
-(defun sspai--file-format (file)
-  "Return source format symbol for FILE."
-  (pcase (downcase (or (file-name-extension file) ""))
-    ((or "md" "markdown") 'markdown)
-    ("org" 'org)
-    (_ (user-error "sspai: 仅支持 .md、.markdown 和 .org 源稿"))))
+(defun sspai--validate-source-file (file)
+  "Require FILE to have an Org extension, and return FILE."
+  (unless (equal (downcase (or (file-name-extension file) "")) "org")
+    (user-error "sspai: 仅支持 .org 源稿"))
+  file)
 
 (defun sspai--read-file-text (file)
   "Read UTF-8 source FILE as text."
@@ -688,7 +675,7 @@ secrets that must not appear in a transport error."
       (format "type-%s" type)))
 
 (defun sspai--normalize-tags (value)
-  "Normalize YAML/Org tag VALUE into a duplicate-free string list."
+  "Normalize Org or API tag VALUE into a duplicate-free string list."
   (let ((items
          (cond
           ((null value) nil)
@@ -815,42 +802,6 @@ secrets that must not appear in a transport error."
      :banner-hash banner-hash
      :image-cache image-cache)))
 
-(defun sspai--md-split-frontmatter (text)
-  "Split Markdown TEXT into (FRONTMATTER BODY)."
-  (unless (string-match "\\`---[ \t]*\n" text)
-    (user-error "sspai: Markdown 源稿必须以 YAML front matter 开头"))
-  (let ((start (match-end 0)))
-    (unless (string-match "^---[ \t]*\n" text start)
-      (user-error "sspai: YAML front matter 缺少结束分隔线"))
-    (list (substring text start (match-beginning 0))
-          (substring text (match-end 0)))))
-
-(defun sspai--md-meta-and-body (file)
-  "Return normalized metadata and raw body for Markdown FILE."
-  (pcase-let* ((`(,frontmatter ,body)
-                 (sspai--md-split-frontmatter
-                  (sspai--read-file-text file)))
-                (object
-                 (condition-case err
-                     (yaml-parse-string
-                      frontmatter
-                      :object-type 'alist
-                      :sequence-type 'list
-                      :null-object nil
-                      :false-object :json-false)
-                   (error
-                    (user-error "sspai: YAML metadata 无效：%s"
-                                (error-message-string err)))))
-                (title (sspai--object-get object 'title))
-                (banner (sspai--object-get object 'banner))
-                (tags (sspai--object-get object 'tags))
-                (sspai-object (sspai--object-get object 'sspai)))
-    (list
-     (sspai--meta-from-object sspai-object title banner tags)
-     ;; The formatter owns one blank line between YAML and body.  Drop that
-     ;; structural newline here so repeated checkpoints stay idempotent.
-     (if (string-prefix-p "\n" body) (substring body 1) body))))
-
 (defun sspai--org-header-and-body (text)
   "Split Org TEXT into (HEADER-LINES BODY)."
   (let ((lines (split-string text "\n" nil))
@@ -948,10 +899,9 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
      body)))
 
 (defun sspai--read-source (file)
-  "Return (META RAW-BODY) from FILE."
-  (pcase (sspai--file-format file)
-    ('markdown (sspai--md-meta-and-body file))
-    ('org (sspai--org-meta-and-body file))))
+  "Return (META RAW-BODY) from Org FILE."
+  (sspai--validate-source-file file)
+  (sspai--org-meta-and-body file))
 
 ;;;; Source formatting and safe checkpoints
 
@@ -974,97 +924,6 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
     entries
     ",")
    "}"))
-
-(defun sspai--format-yaml-tags (tags)
-  "Format TAGS as one YAML sequence."
-  (if tags
-      (concat
-       "tags:\n"
-       (mapconcat
-        (lambda (tag)
-          (concat "  - " (sspai--yaml-string tag)))
-        tags "\n")
-       "\n")
-    "tags: []\n"))
-
-(defun sspai--format-yaml-meta (meta)
-  "Format normalized META as an owned top-level YAML mapping."
-  (let (lines)
-    (cl-labels
-        ((put-string
-          (key value)
-          (when value
-            (push (format "  %s: %s" key (sspai--yaml-string value))
-                  lines)))
-         (put-number
-          (key value &optional omit-zero)
-          (when (and (integerp value)
-                     (or (not omit-zero) (not (zerop value))))
-            (push (format "  %s: %s" key value) lines)))
-         (put-bool
-          (key value)
-          (push (format "  %s: %s" key (if value "true" "false"))
-                lines)))
-      (put-number "id" (plist-get meta :id))
-      (put-string "status" (plist-get meta :status))
-      (unless (plist-get meta :allow-comment)
-        (put-bool "allow-comment" nil))
-      (put-bool "benefits-statement-on"
-                (plist-get meta :benefits-statement-on))
-      (put-number "benefits-statement-id"
-                  (plist-get meta :benefits-statement-id) t)
-      (put-number "banner-id" (plist-get meta :banner-id) t)
-      (put-string "banner-key" (plist-get meta :banner-key))
-      (put-string "banner-hash" (plist-get meta :banner-hash))
-      (when (> (hash-table-count (plist-get meta :image-cache)) 0)
-        (push "  image-cache:" lines)
-        (dolist (entry
-                 (reverse
-                  (sspai--image-cache-alist
-                   (plist-get meta :image-cache))))
-          (push (format "    %s: %s"
-                        (car entry)
-                        (sspai--yaml-string (cdr entry)))
-                lines))))
-    (concat
-     "sspai:\n"
-     (mapconcat #'identity (nreverse lines) "\n")
-     "\n")))
-
-(defun sspai--yaml-remove-owned-fields (frontmatter)
-  "Remove top-level title, banner, tags, and sspai from FRONTMATTER."
-  (let ((lines (split-string frontmatter "\n" nil))
-        output skipping)
-    (dolist (line lines)
-      (let ((top-key
-             (and
-              (string-match
-               "\\`\\([[:alnum:]_-]+\\):\\(?:[ \t].*\\|\\)\\'" line)
-              (downcase (match-string 1 line)))))
-        (when top-key
-          (setq skipping
-                (member top-key '("title" "banner" "tags" "sspai"))))
-        (unless skipping
-          (push line output))))
-    (string-trim-right
-     (mapconcat #'identity (nreverse output) "\n"))))
-
-(defun sspai--format-markdown-source (old-text meta body)
-  "Return Markdown source based on OLD-TEXT, META, and BODY."
-  (let* ((parts (sspai--md-split-frontmatter old-text))
-         (other (sspai--yaml-remove-owned-fields (car parts))))
-    (concat
-     "---\n"
-     "title: " (sspai--yaml-string (or (plist-get meta :title) "")) "\n"
-     (when (plist-get meta :banner)
-       (concat "banner: "
-               (sspai--yaml-string (plist-get meta :banner))
-               "\n"))
-     (sspai--format-yaml-tags (plist-get meta :tags))
-     (unless (string-empty-p other) (concat other "\n"))
-     (sspai--format-yaml-meta meta)
-     "---\n\n"
-     (sspai--trim-body body))))
 
 (defun sspai--format-org-meta (meta)
   "Format META as owned Org keywords."
@@ -1171,69 +1030,29 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
         (ignore-errors (delete-file temporary))))))
 
 (defun sspai--write-source (file meta body)
-  "Safely checkpoint FILE with META and BODY."
-  (let* ((old-text (sspai--read-file-text file))
-         (new-text
-          (pcase (sspai--file-format file)
-            ('markdown
-             (sspai--format-markdown-source old-text meta body))
-            ('org
-             (sspai--format-org-source old-text meta body)))))
-    (sspai--atomic-write-text file new-text)
-    (when-let* ((buffer
-                (find-buffer-visiting (expand-file-name file))))
-      (with-current-buffer buffer
-        (unless (buffer-modified-p)
-          (revert-buffer t t t))))))
+  "Safely checkpoint Org FILE with META and BODY."
+  (sspai--validate-source-file file)
+  (sspai--atomic-write-text
+   file (sspai--format-org-source (sspai--read-file-text file) meta body))
+  (when-let* ((buffer (find-buffer-visiting (expand-file-name file))))
+    (with-current-buffer buffer
+      (unless (buffer-modified-p)
+        (revert-buffer t t t)))))
 
 (defun sspai--create-source (file meta body)
-  "Create a new source FILE from META and BODY without overwriting."
+  "Create a new Org FILE from META and BODY without overwriting."
+  (sspai--validate-source-file file)
   (let* ((file (expand-file-name file))
-         (format (sspai--file-format file))
-         (directory (file-name-directory file))
-         text)
+         (directory (file-name-directory file)))
     (when (file-remote-p file)
       (user-error "sspai: 新建源稿不支持远程路径"))
     (when (or (file-exists-p file) (file-symlink-p file))
       (user-error "sspai: 目标路径已被占用，拒绝覆盖：%s" file))
     (make-directory directory t)
-    (setq text
-          (pcase format
-            ('markdown
-             (concat
-              "---\n"
-              "title: "
-              (sspai--yaml-string (or (plist-get meta :title) ""))
-              "\n"
-              (when (plist-get meta :banner)
-                (concat "banner: "
-                        (sspai--yaml-string (plist-get meta :banner))
-                        "\n"))
-              (sspai--format-yaml-tags (plist-get meta :tags))
-              (sspai--format-yaml-meta meta)
-              "---\n\n"
-              (sspai--trim-body body)))
-            ('org
-             (concat
-              "#+TITLE: " (or (plist-get meta :title) "") "\n"
-              (when (plist-get meta :banner)
-                (concat "#+BANNER: " (plist-get meta :banner) "\n"))
-              "#+FILETAGS: "
-              (if (plist-get meta :tags)
-                  (concat ":"
-                          (mapconcat #'identity
-                                     (plist-get meta :tags) ":")
-                          ":")
-                "")
-              "\n"
-              (sspai--format-org-meta meta)
-              "\n"
-              (sspai--trim-body body)))))
     (with-temp-buffer
-      (insert text)
+      (insert (sspai--format-org-source "" meta body))
       (let ((coding-system-for-write 'utf-8-unix))
-        (write-region
-         (point-min) (point-max) file nil 'silent nil 'excl)))
+        (write-region (point-min) (point-max) file nil 'silent nil 'excl)))
     (find-file file)
     file))
 
@@ -1271,36 +1090,28 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
       (ignore-errors (delete-file stderr-file)))))
 
 (defun sspai--source-to-html (file raw-body)
-  "Convert RAW-BODY from FILE to the SSPAI editor's HTML representation."
+  "Convert Org RAW-BODY from FILE to the SSPAI editor's HTML representation."
+  (sspai--validate-source-file file)
   (unless (executable-find "pandoc")
-    (user-error "sspai: 发布 Markdown/Org 文章需要安装 pandoc"))
-  (let ((from (pcase (sspai--file-format file)
-                ('markdown "gfm+raw_html")
-                ('org "org")))
-        (args nil))
-    (setq args
-          (append
-           (list "-f" from "-t" "html5" "--wrap=none")
-           (when sspai-shift-heading-level
-             '("--shift-heading-level-by=1"))))
-    (string-trim
-     (sspai--run-filter "pandoc" args raw-body))))
+    (user-error "sspai: 发布 Org 文章需要安装 pandoc"))
+  (string-trim
+   (sspai--run-filter
+    "pandoc"
+    (append '("-f" "org" "-t" "html5" "--wrap=none")
+            (when sspai-shift-heading-level '("--shift-heading-level-by=1")))
+    raw-body)))
 
 (defun sspai--remote-html-to-source (file html)
-  "Convert remote HTML into FILE's local source format."
+  "Convert remote HTML into Org for FILE."
+  (sspai--validate-source-file file)
   (unless (executable-find "pandoc")
     (user-error "sspai: 导入 SSPAI 文章需要安装 pandoc"))
-  (let ((to (pcase (sspai--file-format file)
-              ('markdown "gfm+raw_html")
-              ('org "org"))))
-    (sspai--trim-body
-     (sspai--run-filter
-      "pandoc"
-      (append
-       (list "-f" "html" "-t" to "--wrap=none")
-       (when sspai-shift-heading-level
-         '("--shift-heading-level-by=-1")))
-      (or html "")))))
+  (sspai--trim-body
+   (sspai--run-filter
+    "pandoc"
+    (append '("-f" "html" "-t" "org" "--wrap=none")
+            (when sspai-shift-heading-level '("--shift-heading-level-by=-1")))
+    (or html ""))))
 
 (defun sspai--parse-html (html)
   "Parse HTML and return a DOM node."
@@ -2215,24 +2026,9 @@ detectable while publishing; these fingerprints are never saved in metadata."
               (remember (match-string group raw-body))
               (setq position
                     (max (match-end 0) (1+ position)))))))
-      ;; Raw HTML may occur in either source format.
+      (sspai--validate-source-file file)
       (scan "<img\\(?:[^>]*?\\)[ \t\n]+src=[\"']\\([^\"']+\\)[\"']" 1)
-      (pcase (sspai--file-format file)
-        ('markdown
-         (let ((position 0))
-           (while
-               (string-match
-                (concat
-                 "!\\[[^]\n]*\\]("
-                 "\\(?:<\\([^>\n]+\\)>\\|\\([^ \t\n)]+\\)\\)")
-                raw-body position)
-             (remember
-              (or (match-string 1 raw-body)
-                  (match-string 2 raw-body)))
-             (setq position
-                   (max (match-end 0) (1+ position))))))
-        ('org
-         (scan "\\[\\[file:\\([^]\n]+\\)\\]" 1))))
+      (scan "\\[\\[file:\\([^]\n]+\\)\\]" 1))
     (nreverse references)))
 
 (defun sspai--reference-fingerprint (reference base-dir)
@@ -2396,7 +2192,7 @@ Include FILE image dependencies.  This value is never stored in source files."
   (when (buffer-modified-p)
     (user-error "sspai: 请先保存当前源稿"))
   (let ((file (expand-file-name buffer-file-name)))
-    (sspai--file-format file)
+    (sspai--validate-source-file file)
     (when (file-remote-p file)
       (user-error "sspai: 发布与同步不支持远程源稿"))
     (when (file-symlink-p file)
@@ -2799,11 +2595,11 @@ banner therefore appears empty until a real write obtains a new attachment id."
 
 ;;;###autoload
 (defun sspai-new-article (file &optional title)
-  "Create a new Markdown or Org SSPAI source FILE with optional TITLE."
+  "Create a new Org SSPAI source FILE with optional TITLE."
   (interactive
    (list
     (read-file-name
-     "少数派源稿（.md/.markdown/.org）: "
+     "少数派源稿（.org）: "
      default-directory nil nil)))
   (sspai--create-source
    file (sspai--new-meta title) "")
@@ -2816,7 +2612,7 @@ banner therefore appears empty until a real write obtains a new attachment id."
    (list
     (read-number "少数派 article id: ")
     (read-file-name
-     "导入到（.md/.markdown/.org）: "
+     "导入到（.org）: "
      default-directory nil nil)))
   (let* ((remote (sspai--article-get id))
          (meta
