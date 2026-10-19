@@ -164,8 +164,7 @@
    (lambda (file)
      (pcase-let ((`(,meta ,body) (sspai--read-source file)))
        (setf (plist-get meta :title) "After"
-             (plist-get meta :id) 42
-             (plist-get meta :url) "https://sspai.com/post/42")
+             (plist-get meta :id) 42)
        (sspai--write-source file meta body)
        (let ((text (sspai-test--read-text file)))
          (should (string-match-p "^#\\+TITLE: After$" text))
@@ -230,8 +229,7 @@
      "#+TITLE: Secret boundary\n#+SSPAI_STATUS: draft\n\nBody\n"
      (lambda (file)
        (pcase-let ((`(,meta ,body) (sspai--read-source file)))
-         (setf (plist-get meta :id) 7
-               (plist-get meta :url) "https://sspai.com/post/7")
+         (setf (plist-get meta :id) 7)
          (sspai--write-source file meta body)
          (should-not
           (string-match-p
@@ -297,16 +295,9 @@
      :type 'sspai-api-error)))
 
 (ert-deftest sspai-test-editor-status-mapping ()
-  (should (= (sspai--status-type "draft") 4))
-  (should (= (sspai--status-type "published") 5))
-  (should (= (sspai--status-type "community") 5))
-  (should (= (sspai--status-type "audit") 2))
-  (should (= (sspai--status-type "review") 2))
   (should (equal (sspai--type-status 4) "draft"))
   (should (equal (sspai--type-status 5) "published"))
-  (should (equal (sspai--type-status 2) "audit"))
-  (should-error (sspai--status-type "featured")
-                :type 'user-error))
+  (should (equal (sspai--type-status 2) "audit")))
 
 (ert-deftest sspai-test-normalize-article-prefers-editor-last-fields ()
   (let ((article
@@ -430,8 +421,8 @@
           (sspai--full-update-payload
            remote meta "<p>Local body</p>"
            '("attachments/new-banner.png" . 17)
-           'draft)))
-    (should (= (sspai--object-get payload 'type) 5))
+           'audit)))
+    (should (= (sspai--object-get payload 'type) 2))
     (should (equal (sspai--object-get payload 'token)
                    "ARTICLE-TOKEN"))
     (should (equal (sspai--object-get payload 'title)
@@ -482,14 +473,14 @@
      (sspai--full-update-payload
       (sspai--normalize-article
        (sspai-test--article-object 2))
-      meta "<p>Body</p>" nil 'draft)
+      meta "<p>Body</p>" nil 'community)
      :type 'user-error)
     (let ((object (sspai-test--article-object 5)))
       (setf (alist-get 'free object) :json-false)
       (should-error
        (sspai--full-update-payload
         (sspai--normalize-article object)
-        meta "<p>Body</p>" nil 'draft)
+        meta "<p>Body</p>" nil 'community)
        :type 'user-error))))
 
 (ert-deftest sspai-test-firefox-token-is-url-scoped-and-refreshed ()
@@ -1036,10 +1027,10 @@
               ((symbol-function 'sspai--checkpoint-pushed)
                (lambda (&rest _) (push 'checkpoint calls)))
               ((symbol-function 'sspai--confirm) (lambda (&rest _) nil)))
-      (sspai--write-state "/tmp/offline-sspai-test.org" state 'draft)
+      (sspai--write-state "/tmp/offline-sspai-test.org" state 'community)
       ;; Even a second save and browser-side changes use local content.
       (setf (plist-get remote :title) "Edited in browser")
-      (sspai--write-state "/tmp/offline-sspai-test.org" state 'draft)
+      (sspai--write-state "/tmp/offline-sspai-test.org" state 'community)
       (should (equal (nreverse calls)
                      '(assets autosave update checkpoint
                        assets autosave update checkpoint))))))
@@ -1148,7 +1139,7 @@
         (when (memq type '(1 2))
           (should (string-match-p "尚未公开"
                                   (sspai--write-result-label 'community remote)))
-          (should-not (sspai--update-matches-p remote payload 'draft)))))))
+          (should-not (sspai--update-matches-p remote payload 'audit)))))))
 
 (ert-deftest sspai-test-audit-transition-still-rejects-content-differences ()
   (let ((payload (sspai-test--article-object 5)))
@@ -1173,37 +1164,9 @@
               ((symbol-function 'sspai--state) (lambda (_) '(:status tracked)))
               ((symbol-function 'sspai--write-state)
                (lambda (_file _state action) (push action actions))))
-      (sspai-save-draft)
       (sspai-publish-community)
       (sspai-submit-for-review)
-      (should (equal (nreverse actions) '(draft community audit))))))
-
-(ert-deftest sspai-test-sync-only-pushes-local-source ()
-  (let (calls)
-    (cl-letf (((symbol-function 'sspai--current-source-file)
-               (lambda () "/tmp/offline-sspai-test.org"))
-              ((symbol-function 'sspai--state)
-               (lambda (_) (list :status 'tracked :meta (sspai-test--metadata "Local"))))
-              ((symbol-function 'sspai--write-state)
-               (lambda (_file _state action) (push action calls))))
-      (sspai-sync)
-      (should (equal calls '(draft))))))
-
-(ert-deftest sspai-test-open-links-are-derived-from-article-id ()
-  (let (opened)
-    (cl-letf (((symbol-function 'sspai--current-source-file)
-               (lambda () "/tmp/offline-sspai-test.org"))
-              ((symbol-function 'sspai--read-source)
-               (lambda (_)
-                 (list (sspai--meta-from-object '((id . 42)) "Local" nil nil)
-                       "Body\n")))
-              ((symbol-function 'browse-url)
-               (lambda (url &rest _) (push url opened))))
-      (sspai-open-remote)
-      (sspai-open-preview)
-      (should (equal (nreverse opened)
-                     '("https://sspai.com/post/42"
-                       "https://sspai.com/write/42"))))))
+      (should (equal (nreverse actions) '(community audit))))))
 
 (ert-deftest sspai-test-rejects-non-org-source-files ()
   (dolist (suffix '(".md" ".markdown" ".txt"))
@@ -1217,18 +1180,50 @@
                     :type 'user-error)
       (should-not (file-exists-p file)))))
 
-(ert-deftest sspai-test-conversion-always-uses-org ()
-  (let (calls)
-    (cl-letf (((symbol-function 'executable-find) (lambda (_) "/mock/pandoc"))
-              ((symbol-function 'sspai--run-filter)
-               (lambda (_program args _input) (push args calls) "converted")))
-      (should (equal (sspai--source-to-html "/tmp/article.org" "* Heading")
-                     "converted"))
-      (should (equal (sspai--remote-html-to-source "/tmp/article.org" "<h2>Heading</h2>")
-                     "converted\n"))
-      (should (equal (nreverse calls)
-                     '(("-f" "org" "-t" "html5" "--wrap=none" "--shift-heading-level-by=1")
-                       ("-f" "html" "-t" "org" "--wrap=none" "--shift-heading-level-by=-1")))))))
+(ert-deftest sspai-test-native-org-export-preserves-article-content ()
+  (let* ((directory (make-temp-file "sspai-export-" t))
+         (file (expand-file-name "article.org" directory))
+         (image (expand-file-name "asset.png" directory)))
+    (unwind-protect
+        (progn
+          (with-temp-file image (insert "test image"))
+          (cl-letf (((symbol-function 'executable-find)
+                     (lambda (&rest _) (ert-fail "export searched for an external program"))))
+            (let ((html
+                   (sspai--source-to-html
+                    file
+                    (concat "* 标题\n中文 *加粗* [[https://example.com][链接]]\n\n"
+                            "[[file:asset.png]]\n\n"
+                            "#+begin_src text\n<tag>&value\n#+end_src\n"))))
+              (should (string-match-p "<h2[^>]*>标题</h2>" html))
+              (should (string-match-p "中文" html))
+              (should (string-match-p "<\\(?:b\\|strong\\)>加粗</" html))
+              (should (string-match-p "href=\"https://example.com\"" html))
+              (should (string-match-p "<img[^>]*src=\"asset.png\"" html))
+              (should (string-match-p "&lt;tag&gt;&amp;value" html))
+              (should-not (string-match-p "<html\\|<head\\|table-of-contents\\|section-number" html)))))
+      (delete-directory directory t))))
+
+(ert-deftest sspai-test-native-org-export-can-keep-heading-level ()
+  (let ((sspai-shift-heading-level nil))
+    (should (string-match-p
+             "<h1[^>]*>Heading</h1>"
+             (sspai--source-to-html "/tmp/article.org" "* Heading\nBody\n")))))
+
+(ert-deftest sspai-test-native-org-export-never-executes-babel ()
+  (let ((org-export-use-babel t))
+    (cl-letf (((symbol-function 'org-babel-execute-src-block)
+               (lambda (&rest _) (ert-fail "executed a source block"))))
+      (let ((html (sspai--source-to-html
+                   "/tmp/article.org"
+                   "#+begin_src emacs-lisp :exports both\n(message \"must not execute\")\n#+end_src\n")))
+        (should (string-match-p "must not execute" html))))))
+
+(ert-deftest sspai-test-draft-action-is-rejected-before-any-write ()
+  (cl-letf (((symbol-function 'sspai--prepare-write-assets)
+             (lambda (&rest _) (ert-fail "prepared assets for draft action"))))
+    (should-error (sspai--write-state "/tmp/article.org" nil 'draft)
+                  :type 'user-error)))
 
 (ert-deftest sspai-test-org-checkpoint-is-idempotent ()
   (sspai-test--with-temp-file
@@ -1240,6 +1235,22 @@
        (pcase-let ((`(,meta ,body) (sspai--read-source file)))
          (sspai--write-source file meta body))
        (should (equal once (sspai-test--read-text file)))))))
+
+(ert-deftest sspai-test-new-article-only-creates-a-local-org-file ()
+  (let* ((directory (make-temp-file "sspai-local-" t))
+         (file (expand-file-name "article.org" directory)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'sspai--http)
+                   (lambda (&rest _) (ert-fail "new local file contacted server"))))
+          (sspai-new-article file "Local article")
+          (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+            (should (equal (plist-get meta :title) "Local article"))
+            (should-not (plist-get meta :id))
+            (should-not (plist-get meta :status))
+            (should (string-empty-p (string-trim body)))))
+      (when-let* ((buffer (find-buffer-visiting file)))
+        (kill-buffer buffer))
+      (delete-directory directory t))))
 
 (provide 'sspai-test)
 

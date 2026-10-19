@@ -7,6 +7,10 @@
 - Only Org mode source files are supported; do not add Markdown/YAML support.
 - Local Org files are authoritative. Publication pushes local
   content; do not add bidirectional synchronization or remote conflict checks.
+- Use the built-in Org HTML exporter; do not add external conversion tools.
+- Writing and saving stay local. Keep only explicit community publication and
+  editorial submission flows; do not add remote draft saving, generic sync,
+  payload inspection, article import, or browser-opening commands.
 - Keep source metadata minimal. Do not persist values that can be derived from
   the article ID or package configuration.
 - Run `make check` before publishing changes. Tests must stay offline and must

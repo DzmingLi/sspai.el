@@ -1,12 +1,12 @@
 # sspai.el
 
-在 Emacs 里撰写、保存与发布少数派文章，以本地稿件为准。仅支持 Org
-源稿，通过 `firefox-cookies.el` 使用 Firefox 中已有的登录状态。
+从本地 Org 文件发布少数派文章。写作和保存都在本地完成，发布时通过
+`firefox-cookies.el` 使用 Firefox 中已有的登录状态。
 
 ## 安装
 
-本包只面向最新版 Emacs，不维护旧版本兼容；当前最低版本声明为 31.1。
-使用内置的 `package-vc-install` 依次安装依赖和本包：
+只面向最新版 Emacs，不维护旧版本兼容；当前最低版本声明为 31.1。
+使用内置的 `package-vc-install` 安装：
 
 ```elisp
 (require 'package-vc)
@@ -14,211 +14,116 @@
 (package-vc-install "https://github.com/DzmingLi/sspai.el")
 ```
 
-然后加载并配置 Firefox profile：
+配置 Firefox profile，然后在该 profile 中登录少数派：
 
 ```elisp
 (require 'sspai)
 (setq firefox-cookies-profile-directory "~/.config/mozilla/firefox/default/")
 ```
 
-需要系统中可用的 Pandoc；读取 Firefox Cookie 还需要 Emacs 支持 SQLite
-（`M-: (sqlite-available-p)` 应返回非 `nil`）。
+Emacs 需要支持 SQLite（`M-: (sqlite-available-p)` 返回非 `nil`）。
+正文使用 Emacs 内置的 `ox-html` 导出，不需要外部转换工具。导出时不会
+执行 Org Babel 代码块。
 
-## 功能
+## 使用
 
-- 新建 Org 稿件
-- 保存草稿、直接发布到 Matrix 社区、提交少数派审核
-- 把已有文章导入新文件，之后以本地稿件为准单向更新远端
-- 上传正文图片与题图，并缓存已上传图片
-- 通过 `firefox-cookies.el` 使用 Firefox 中的少数派登录状态
+打开本地 `.org` 文件，写作后用 `C-x C-s` 保存，再选择发布方式：
 
-这个包不模拟登录；请先在自己配置的 Firefox profile 中登录少数派。
+| 命令 | 行为 |
+| --- | --- |
+| `sspai-publish-community` | 立即发布到 Matrix 社区，已有文章则更新本地版本 |
+| `sspai-submit-for-review` | 投稿到少数派编辑部 |
+| `sspai-status` | 查看文章关联状态和远端编辑状态 |
+| `sspai-new-article` | 新建本地 Org 文件 |
+| `sspai-upload-image-file` | 单独上传图片并复制其 URL |
 
-## 依赖
+新文章不需要预先填写少数派元数据。例如：
 
-- 最新版 Emacs（当前版本声明为 31.1）
-- [firefox-cookies.el](https://github.com/DzmingLi/firefox-cookies.el) 0.1.0 或更高版本
-- [Pandoc](https://pandoc.org/)（发布与导入正文时用于 Org 和
-  HTML 之间的转换）
+```org
+#+TITLE: 示例文章
 
-将仓库加入 `load-path`，然后：
+* 标题
 
-```elisp
-(require 'sspai)
+正文从这里开始。
 ```
+
+保存只使用 Org/Emacs 自身的文件保存功能。发布命令始终以当前本地内容
+更新远端，即使网页上修改过文章，也会被本地版本覆盖。
+
+少数派可能将“立即发布”的文章转入审核。客户端会核对提交内容，写回
+实际的 `audit` 状态并提示尚未公开。远端已进入审核或精选锁定状态时，
+需要平台恢复可编辑状态后才能更新。
+
+首次发布会先建立远端文章记录，再完成发布或投稿。客户端会立即保存
+新文章 ID；若后续提交失败，重试时更新这条记录，避免重复创建。若创建
+请求本身超时且结果无法确认，命令会停止；请先到少数派后台确认结果，
+已有记录可将 ID 填入 `#+SSPAI_ID`，不要盲目重试。
+
+## Org 字段
+
+可选的文章设置：
+
+| 关键字 | 含义 |
+| --- | --- |
+| `#+BANNER` | 本地题图文件路径 |
+| `#+FILETAGS` | 文章标签，如 `:Emacs:效率:` |
+| `#+SSPAI_ALLOW_COMMENT` | 省略时允许评论；关闭时写 `false` |
+| `#+SSPAI_BENEFITS_STATEMENT_ON` | 是否启用利益相关声明，默认 `false` |
+| `#+SSPAI_BENEFITS_STATEMENT_ID` | 启用利益声明时选择的声明类型 ID |
+
+发布成功后，客户端维护 `SSPAI_ID`、`SSPAI_STATUS` 和图片上传缓存。
+`SSPAI_STATUS` 记录实际发布结果，不决定下一次发布方式；每次操作由所选
+命令决定。客户端写回这些信息时保留本地标题、正文、标签和其他 Org 关键字。
+
+已有官方标签会保留其服务端 ID；新标签名称作为自定义标签提交。
+
+## 图片
+
+Org 图片链接（如 `[[file:./image.png]]`）和 `#+BANNER` 指定的本地题图，
+会在发布时上传。正文链接在提交的 HTML 中替换为 CDN 地址，Org 源稿保持
+本地路径。上传缓存按文件内容保存，重复发布未变化的图片不会再次上传。
+
+外部 HTTP(S) 正文图片保持外链。题图必须是本地文件，或带有匹配上传 ID
+的少数派 CDN 图片。
+
+支持 PNG、JPEG、GIF，单张上限 5 MB，超过 2 MB 会提示。每张图片上传
+成功后立即保存缓存；若图片已上传但本地缓存保存失败，错误会给出 CDN
+地址，修复本地文件后再继续。
 
 ## 认证
 
-默认通过 `firefox-cookies-get` 读取 `sspai_jwt_token` Cookie，转换为 API
-所需的 Bearer token。先配置 Firefox profile（不会自动扫描或猜测）：
+每次 API 请求通过 `firefox-cookies-get` 读取 `sspai_jwt_token`，转换为
+Bearer token。不会扫描或猜测 Firefox profile；容器可通过
+`firefox-cookies-origin-attributes` 选择。
 
-```elisp
-(setq firefox-cookies-profile-directory "~/.config/mozilla/firefox/default/")
-```
+账户 token、单篇文章编辑 token 和七牛上传凭据只在内存中使用，不写入
+Org 文件。账户 Bearer 只发送到少数派 API，图片上传使用独立的七牛凭据。
 
-在该 profile 中登录 [少数派](https://sspai.com)，然后直接运行发布命令。
-每次 API 请求都会重新读取 Cookie，Firefox 登录更新后无需复制 token 或
-重启 Emacs。`firefox-cookies-origin-attributes` 可选择 Firefox 容器。
-仅登录 token 会用于认证，其他 Cookie 不会发送给 API 或图片上传服务。
-
-如需使用加密的 `auth-source` 后端，可设置
-`(setq sspai-cookie-function nil)`，并在 `~/.authinfo.gpg` 中加入：
+也可以设置当前会话的 `sspai-access-token`。若希望使用 `auth-source`，
+设置 `(setq sspai-cookie-function nil)`，并添加：
 
 ```text
 machine sspai.com login sspai.el port https password YOUR_BEARER_TOKEN
 ```
 
-也可以只为当前 Emacs 会话设置（优先于 Firefox 和 `auth-source`）：
-
-```elisp
-(setq sspai-access-token "YOUR_BEARER_TOKEN")
-```
-
-`sspai.el` 不会把账户 Bearer token 或单篇文章的编辑 token 写入源稿。
-图片上传使用独立的短期七牛 token；账户 Bearer 只发送给配置的少数派
-API base，不会发送到七牛域名。
-
-包的默认服务地址如下，只需在全局配置中设置，稿件不保存 API 地址：
-
-```elisp
-(setq sspai-api-base-url "https://sspai.com/api/v1"
-      sspai-site-base-url "https://sspai.com"
-      sspai-upload-url "https://upload.qiniup.com/"
-      sspai-cdn-base-url "https://cdnfile.sspai.com")
-```
-
-## 快速开始
-
-运行：
-
-```text
-M-x sspai-new-article
-```
-
-选择 `.org` 文件后开始写作。常用命令：
-
-| 命令 | 行为 |
-| --- | --- |
-| `sspai-save-draft` | 新建或更新远端草稿 |
-| `sspai-publish-community` | 发布到 Matrix 社区 |
-| `sspai-submit-for-review` | 提交少数派编辑审核 |
-| `sspai-sync` | 按稿件的 `status` 单向推送本地内容 |
-| `sspai-status` | 查看文章关联状态和远端编辑状态 |
-| `sspai-show-payload` | 只读预览 payload；已有文章会先 GET 最新对象，但不写入或上传 |
-| `sspai-import-article` | 将已有文章导入新文件，不覆盖现有源稿 |
-| `sspai-open-remote` | 打开已发布文章 |
-| `sspai-open-preview` | 打开当前稿件的网页预览 |
-| `sspai-upload-image-file` | 单独上传一张图片并复制其 URL |
-
-对已经发布的文章运行 `sspai-save-draft`，会保存新的编辑版本，但不会把
-远端文章从已发布状态降回草稿；只有 `sspai-publish-community` 才会把该
-编辑版本更新为公开正文。
-
-少数派可能把「立即发布」转入审核。客户端会核对全文与其他字段，保存
-服务端实际返回的 `audit` 状态，并明确提示尚未公开；此时不会重复发布。
-
-创建草稿属于非幂等操作：如果请求超时而服务端是否成功未知，
-`sspai.el` 会停止并报告“创建结果未知”，不会自动重试，以免生成重复
-草稿。请先在少数派后台确认，再决定导入已有草稿或重新创建。
-
-## 稿件格式
-
-```org
-#+TITLE: 示例文章
-#+BANNER: ./images/banner.png
-#+FILETAGS: :Emacs:效率:
-#+SSPAI_STATUS: draft
-
-正文从这里开始。
-```
-
-### 通用题图字段
-
-使用 Org 关键字 `#+TITLE`、`#+BANNER` 和 `#+FILETAGS` 描述文章。
-少数派的发布状态和图片上传缓存保存在 `#+SSPAI_*` 关键字中。
-写回发布结果时，会保留其他 Org 关键字和本地正文。
-
-适合手动设置的少数派字段有：
-
-| Org 关键字 | 含义 |
-| --- | --- |
-| `#+SSPAI_STATUS` | `draft`、`published` 或 `audit` |
-| `#+SSPAI_ALLOW_COMMENT` | 是否允许评论，省略时默认 `true`；关闭时显式写 `false` |
-| `#+SSPAI_BENEFITS_STATEMENT_ON` | 是否启用利益相关声明 |
-| `#+SSPAI_BENEFITS_STATEMENT_ID` | 已有声明的数字 ID |
-
-文章链接由 `SSPAI_ID` 和站点地址自动推导，源稿不保存 URL 字段。
-
-`SSPAI_ID`、`SSPAI_BANNER_ID`、`SSPAI_BANNER_KEY`、`SSPAI_BANNER_HASH`
-和图片上传缓存由客户端维护，不建议手改。稿件不保存 `BASE_HASH` 或
-`SOURCE_HASH`。
-
-`#+FILETAGS: :Emacs:效率:` 定义文章标签。更新已有文章时，名称匹配的
-少数派官方标签会保留服务端返回的完整标签对象与 ID；其余名称作为
-`custom_tags` 发送。新稿无法凭名称伪造官方标签 ID，因此默认都作为自定义
-标签。
-
-## 图片上传
-
-正文中的本地图片和 `banner` 指向的本地题图会经过三个阶段：
-
-1. 向少数派 API 申请短期上传凭据；
-2. 使用短期凭据把文件直传七牛，且不携带账户 Bearer；
-3. 正文图片把 CDN URL 写回 HTML；题图把 key 与 attachment ID 写入文章
-   的 banner 字段。
-
-第三阶段不是额外的“七牛登记”请求。编辑器另有面向远程图片 URL 的
-`attachment/batch/upload` 转存接口，它不属于本地文件直传流程。
-
-源稿保存内容哈希到 CDN URL 的缓存，重复发布未变化的图片不会再次上传。
-外部 HTTP(S) 正文图片保持原样。题图需要可供少数派识别的 attachment ID，
-因此应使用本地文件或已由当前账户上传并保存过检查点的少数派 CDN 题图。
-
-默认接受 PNG、JPEG 与 GIF，单张上限 5 MB，超过 2 MB 会给出体积提示。
-少数派题图的标准尺寸为 1420 × 708；中间的 708 × 708 区域应保留关键
-视觉内容，以适应不同裁切方式。
-
-每张图片上传成功后都会立刻保存缓存检查点。如果远端上传已经成功、但
-本地文件写回失败，命令会用专门的错误说明“图片已上传但未保存检查点”；
-这时不要盲目重试，可先复制错误中的 CDN URL 或修复本地文件权限。
-
-## 以本地稿件为准
-
-保存、发布和 `sspai-sync` 始终把当前本地内容推送到少数派。即使网页上
-修改过文章，也会直接用本地稿件更新，无需额外的覆盖选项。
-
-不会自动拉取远端正文，也没有双向同步或内容哈希检查点。
-`sspai-import-article` 仅用于把已有文章导入一个新文件；创建本地源稿后，
-后续编辑都在本地进行。
-
-发布成功后只更新文章 ID、发布状态和图片上传信息，本地标题、正文、
-标签和其他写作设置继续以源文件为准。发布期间若本地稿件发生变化，
-会停止写回，避免覆盖刚完成的本地编辑。
-
-单篇文章的编辑 token 仅存在于一次命令的内存中。每次更新都会先读取最新
-文章信息，再使用服务端返回的 token，避免把易失凭据长期保存在文件中。
-
-远端已进入精选/审核锁定等不可编辑状态时，客户端会拒绝更新；它不会把
-服务端状态强行降回草稿。
-
 ## 测试
 
-测试全部离线运行，HTTP、少数派 API 和七牛边界都使用 mock。
-依赖位于 Emacs 的 `load-path` 时：
+测试全部离线运行，不读取真实 Cookie，不发布文章。依赖已在 `load-path`
+中时运行：
 
 ```sh
 make check
 ```
 
-依赖源码位于其他目录时，可以显式传入路径：
+或显式传入依赖路径：
 
 ```sh
 make check EMACSFLAGS='--batch -Q' \
   ELISP_PATH='/path/to/firefox-cookies.el'
 ```
 
-`make check` 会运行离线 ERT 测试，并将字节编译警告视为错误。
-GitHub Actions 跟随 Emacs 最新开发版（snapshot）运行相同检查。
+检查包括 ERT 测试和将编译警告视为错误的字节编译。GitHub Actions 使用
+最新版 Emacs 开发快照运行相同检查。
 
 ## 许可
 

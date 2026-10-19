@@ -28,7 +28,7 @@
 ;;; Commentary:
 
 ;; Write SSPAI articles in Org mode, upload local body images and the
-;; document's generic `banner' image, save drafts, publish to the community,
+;; document's generic `banner' image, publish to the community,
 ;; submit for editorial review, and update existing articles from local sources.
 ;;
 ;; Use `firefox-cookies' to read the explicitly configured Firefox login.
@@ -38,7 +38,6 @@
 ;;   #+TITLE: Example
 ;;   #+BANNER: ./banner.png
 ;;   #+FILETAGS: :Emacs:
-;;   #+SSPAI_STATUS: draft
 ;;
 ;; Local Org files are authoritative.  Publication only pushes local content.
 
@@ -51,6 +50,7 @@
 (require 'json)
 (require 'mailcap)
 (require 'org)
+(require 'ox-html)
 (require 'subr-x)
 (require 'url)
 (require 'url-cookie)
@@ -83,11 +83,6 @@
 (defcustom sspai-api-base-url "https://sspai.com/api/v1"
   "Base URL of the authorized SSPAI editor API.
 It must be an HTTPS URL without a query or fragment."
-  :type 'string
-  :group 'sspai)
-
-(defcustom sspai-site-base-url "https://sspai.com"
-  "Public SSPAI site origin used to construct article and preview URLs."
   :type 'string
   :group 'sspai)
 
@@ -168,13 +163,6 @@ The article title occupies the page's h1, so source h1 headings become h2."
   :group 'sspai)
 
 ;;;; Constants and data structures
-
-(defconst sspai--status-to-type
-  '(("draft" . 4)
-    ("published" . 5)
-    ("community" . 5)
-    ("audit" . 2)
-    ("review" . 2)))
 
 (defconst sspai--type-to-status
   '((0 . "featured")
@@ -360,12 +348,6 @@ Leading whitespace, including indentation on the first line, is preserved."
   (unless (and (stringp path) (string-prefix-p "/" path))
     (error "sspai: API path 必须以 / 开头：%S" path))
   (concat (sspai--normalize-base-url) path))
-
-(defun sspai--site-url (path)
-  "Return absolute SSPAI site URL for PATH."
-  (concat (sspai--normalize-origin "site base" sspai-site-base-url)
-          (if (string-prefix-p "/" path) "" "/")
-          path))
 
 (defun sspai--secret-value (secret)
   "Return SECRET, calling it when auth-source supplied a thunk."
@@ -663,12 +645,6 @@ secrets that must not appear in a transport error."
           "sspai: status 必须是 draft、published 或 audit：%s"
           text)))))
 
-(defun sspai--status-type (status)
-  "Return Matrix editor numeric type for STATUS."
-  (or (cdr (assoc (sspai--normalize-status status)
-                  sspai--status-to-type))
-      (user-error "sspai: 状态 %s 不能用于写入" status)))
-
 (defun sspai--type-status (type)
   "Return local status string for Matrix editor TYPE."
   (or (cdr (assq type sspai--type-to-status))
@@ -735,8 +711,8 @@ secrets that must not appear in a transport error."
   (unless (or (null object) (listp object) (hash-table-p object))
     (user-error "sspai: sspai metadata 必须是 mapping/object"))
   (let* ((id (sspai--integer "id" (sspai--object-get object 'id)))
-         (status (sspai--normalize-status
-                  (sspai--object-get object 'status) "draft"))
+         (status (when-let* ((value (sspai--object-get object 'status)))
+                   (sspai--normalize-status value)))
          (allow-comment
           (sspai--boolean
            "allow-comment"
@@ -789,7 +765,6 @@ secrets that must not appear in a transport error."
        "sspai: 开启利益相关声明时必须设置 benefits-statement-id"))
     (list
      :id id
-     :url (and id (sspai--site-url (format "/post/%d" id)))
      :status status
      :title title
      :banner banner
@@ -1058,60 +1033,20 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
 
 ;;;; Source conversion
 
-(defun sspai--run-filter (program args input)
-  "Run PROGRAM with ARGS over INPUT and return UTF-8 stdout."
-  (let ((stderr-file (make-temp-file "sspai-stderr-"))
-        (stdout-buffer (generate-new-buffer " *sspai-stdout*")))
-    (unwind-protect
-        (with-temp-buffer
-          (insert input)
-          (let ((coding-system-for-write 'utf-8)
-                (coding-system-for-read 'utf-8)
-                (status
-                 (apply
-                  #'call-process-region
-                  (point-min) (point-max)
-                  program nil
-                  (list stdout-buffer stderr-file)
-                  nil args)))
-            (unless (eq status 0)
-              (let ((stderr
-                     (with-temp-buffer
-                       (insert-file-contents stderr-file)
-                       (string-trim (buffer-string)))))
-                (error "sspai: %s 退出 %s%s"
-                       program status
-                       (if (string-empty-p stderr)
-                           "" (concat "：" stderr)))))
-            (with-current-buffer stdout-buffer
-              (buffer-string))))
-      (when (buffer-live-p stdout-buffer)
-        (kill-buffer stdout-buffer))
-      (ignore-errors (delete-file stderr-file)))))
-
 (defun sspai--source-to-html (file raw-body)
-  "Convert Org RAW-BODY from FILE to the SSPAI editor's HTML representation."
+  "Export Org RAW-BODY from FILE using the built-in HTML exporter."
   (sspai--validate-source-file file)
-  (unless (executable-find "pandoc")
-    (user-error "sspai: 发布 Org 文章需要安装 pandoc"))
-  (string-trim
-   (sspai--run-filter
-    "pandoc"
-    (append '("-f" "org" "-t" "html5" "--wrap=none")
-            (when sspai-shift-heading-level '("--shift-heading-level-by=1")))
-    raw-body)))
-
-(defun sspai--remote-html-to-source (file html)
-  "Convert remote HTML into Org for FILE."
-  (sspai--validate-source-file file)
-  (unless (executable-find "pandoc")
-    (user-error "sspai: 导入 SSPAI 文章需要安装 pandoc"))
-  (sspai--trim-body
-   (sspai--run-filter
-    "pandoc"
-    (append '("-f" "html" "-t" "org" "--wrap=none")
-            (when sspai-shift-heading-level '("--shift-heading-level-by=-1")))
-    (or html ""))))
+  (let ((default-directory (file-name-directory (expand-file-name file)))
+        (org-export-use-babel nil)
+        (org-export-allow-bind-keywords nil)
+        (org-html-htmlize-output-type nil))
+    (string-trim
+     (org-export-string-as
+      raw-body 'html t
+      (list :with-toc nil :section-numbers nil :with-title nil
+            :with-author nil :with-date nil :html-inline-images t
+            :html-doctype "html5" :html-html5-fancy t
+            :html-toplevel-hlevel (if sspai-shift-heading-level 2 1))))))
 
 (defun sspai--parse-html (html)
   "Parse HTML and return a DOM node."
@@ -1699,7 +1634,6 @@ its private :raw object.  Neither value is ever written to a source file."
      :benefits-statement-on benefits-on
      :benefits-statement-id benefits-id
      :updated-at updated-at
-     :url (sspai--site-url (format "/post/%d" id))
      :raw (copy-tree object t))))
 
 (defun sspai--api-error-code-or-status (err)
@@ -1835,7 +1769,7 @@ new names become custom tags because the standard API requires server IDs."
   "Return a complete update object based on REMOTE.
 META, HTML, BANNER-PAIR, and ACTION supply intentional edits while all unknown
 service fields and the transient article token are preserved."
-  (unless (memq action '(draft community audit))
+  (unless (memq action '(community audit))
     (error "sspai: 未知写入动作：%S" action))
   (let* ((raw (copy-tree (plist-get remote :raw) t))
          (title
@@ -1844,7 +1778,6 @@ service fields and the transient article token are preserved."
           (sspai--tag-payloads (plist-get meta :tags) remote))
          (target-type
           (pcase action
-            ('draft (plist-get remote :type))
             ('community 5)
             ('audit 2))))
     (unless (and (listp raw)
@@ -1881,8 +1814,8 @@ service fields and the transient article token are preserved."
            raw 'benefits_statement_id
            (or (plist-get meta :benefits-statement-id) 0)))
     (setq raw (sspai--object-set raw 'delete_status :json-false))
-    ;; Community publication commits the edit.  Draft saving and audit
-    ;; submission intentionally leave the currently published fields alone.
+    ;; Community publication commits the edit.  Audit submission leaves the
+    ;; currently published fields alone until the service finishes review.
     (when (eq action 'community)
       (setq raw (sspai--object-set raw 'title title))
       (setq raw (sspai--object-set raw 'body html)))
@@ -2008,7 +1941,7 @@ Only that status transition is allowed; every other requested field must match."
 
 (defun sspai--body-image-references (file raw-body)
   "Return local-or-remote image references found in FILE's RAW-BODY.
-Pandoc remains the authority for publication; this conservative scanner only
+The Org exporter handles publication; this conservative scanner only
 adds dependency fingerprints so replacing bytes at an unchanged local path is
 detectable while publishing; these fingerprints are never saved in metadata."
   (let (references)
@@ -2106,46 +2039,6 @@ Include FILE image dependencies.  This value is never stored in source files."
      copy :image-cache
      (copy-hash-table (plist-get meta :image-cache)))))
 
-(defun sspai--meta-apply-remote (meta remote)
-  "Return META updated from canonical REMOTE fields."
-  (let* ((copy (sspai--copy-meta meta))
-         (same-local-banner
-          (and (plist-get meta :banner)
-               (string-equal
-                (or (plist-get meta :banner-key) "")
-                (or (plist-get remote :banner-key) ""))
-               (= (or (plist-get meta :banner-id) 0)
-                  (or (plist-get remote :banner-id) 0))))
-         (banner
-          (cond
-           ((null (plist-get remote :banner-key)) nil)
-           (same-local-banner (plist-get meta :banner))
-           (t (plist-get remote :banner-url)))))
-    (setq copy (plist-put copy :id (plist-get remote :id)))
-    (setq copy (plist-put copy :url (plist-get remote :url)))
-    (setq copy (plist-put copy :status (plist-get remote :status)))
-    (setq copy (plist-put copy :title (plist-get remote :title)))
-    (setq copy (plist-put copy :banner banner))
-    (setq copy (plist-put copy :tags (plist-get remote :tags)))
-    (setq copy
-          (plist-put copy :allow-comment
-                     (plist-get remote :allow-comment)))
-    (setq copy
-          (plist-put copy :benefits-statement-on
-                     (plist-get remote :benefits-statement-on)))
-    (setq copy
-          (plist-put copy :benefits-statement-id
-                     (plist-get remote :benefits-statement-id)))
-    (setq copy
-          (plist-put copy :banner-id
-                     (plist-get remote :banner-id)))
-    (setq copy
-          (plist-put copy :banner-key
-                     (plist-get remote :banner-key)))
-    (unless same-local-banner
-      (setq copy (plist-put copy :banner-hash nil)))
-    copy))
-
 (defun sspai--assert-source-unchanged
     (file expected-meta expected-body)
   "Refuse a checkpoint when editable FILE changed during a network operation."
@@ -2215,7 +2108,6 @@ Include FILE image dependencies.  This value is never stored in source files."
   "Copy local META and record REMOTE identity and publication status only."
   (let ((updated (sspai--copy-meta meta)))
     (setf (plist-get updated :id) (plist-get remote :id)
-          (plist-get updated :url) (plist-get remote :url)
           (plist-get updated :status) (plist-get remote :status))
     updated))
 
@@ -2249,7 +2141,6 @@ be retried using the recorded article ID without creating another draft."
     (setq updated
           (plist-put updated :status
                      (pcase action
-                       ('draft "draft")
                        ('community "published")
                        ('audit "audit"))))
     (condition-case err
@@ -2328,29 +2219,14 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
 (defun sspai--action-label (action)
   "Return a Chinese label for article ACTION."
   (pcase action
-    ('draft "保存草稿")
     ('community "发布到 Matrix 社区")
     ('audit "提交编辑审核")
     (_ (format "%S" action))))
 
-(defun sspai--action-from-meta (meta)
-  "Return write action requested by META status."
-  (pcase (plist-get meta :status)
-    ("draft" 'draft)
-    ("published" 'community)
-    ("audit" 'audit)
-    (_
-     (user-error "sspai: 当前 status 不可用于写入：%s"
-                 (plist-get meta :status)))))
-
-(defun sspai--needs-post-create-update-p (meta action)
-  "Return non-nil when a new draft needs a follow-up update."
-  (or (not (eq action 'draft))
-      (plist-get meta :benefits-statement-on)
-      (> (or (plist-get meta :benefits-statement-id) 0) 0)))
-
 (defun sspai--write-state (file state action)
   "Execute ACTION for FILE, always publishing its local content from STATE."
+  (unless (memq action '(community audit))
+    (user-error "sspai: 仅支持立即发布或投稿编辑部"))
   (let* ((status (plist-get state :status))
          (meta (plist-get state :meta))
          (raw-body (plist-get state :raw-body))
@@ -2391,53 +2267,26 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
             (message "sspai: 已%s并保存发布状态"
                      (sspai--write-result-label action written))
             written)
+        ;; The editor API first creates an article record (type 4), then
+        ;; publishes it with type 5 or submits it with type 2.  Persist its ID
+        ;; before proceeding so an interrupted publish cannot create duplicates.
         (let* ((created
                 (sspai--article-add
-                (sspai--article-add-payload
-                  intended-meta html banner-pair)))
-               (follow-up
-                (sspai--needs-post-create-update-p
-                 intended-meta action)))
-          (if (not follow-up)
-              (progn
-                (sspai--checkpoint-pushed
-                 file meta raw-body created)
-                (message
-                 "sspai: 已创建草稿并保存 article id/checkpoint")
-                created)
-            ;; Persist the non-idempotent create result before either of the
-            ;; subsequent update calls.  A failure from this point forward can
-            ;; safely be retried as an update rather than another add.
-            (let* ((interim
-                    (sspai--checkpoint-created-interim
-                     file meta intended-meta raw-body
-                     created action))
-                   (after-autosave
-                    (sspai--auto-save-confirmed
-                     created title html))
-                   (payload
-                    (sspai--full-update-payload
-                     after-autosave intended-meta
-                     html banner-pair action))
-                   (written
-                    (sspai--full-update-confirmed
-                     after-autosave payload action)))
-              (sspai--checkpoint-pushed
-               file interim raw-body written)
-              (message
-               "sspai: 已创建草稿、%s并保存 checkpoint"
-               (sspai--write-result-label action written))
-              written)))))))
-
-;;;###autoload
-(defun sspai-save-draft ()
-  "Create or save the current SSPAI draft.
-For a published article this updates its editable `*_last' version without
-changing the committed public title/body.  Local content is authoritative."
-  (interactive)
-  (let* ((file (sspai--current-source-file))
-         (state (sspai--state file)))
-    (sspai--write-state file state 'draft)))
+                 (sspai--article-add-payload intended-meta html banner-pair)))
+               (interim
+                (sspai--checkpoint-created-interim
+                 file meta intended-meta raw-body created action))
+               (after-autosave
+                (sspai--auto-save-confirmed created title html))
+               (payload
+                (sspai--full-update-payload
+                 after-autosave intended-meta html banner-pair action))
+               (written
+                (sspai--full-update-confirmed after-autosave payload action)))
+          (sspai--checkpoint-pushed file interim raw-body written)
+          (message "sspai: 已%s并保存发布状态"
+                   (sspai--write-result-label action written))
+          written)))))
 
 ;;;###autoload
 (defun sspai-publish-community ()
@@ -2455,16 +2304,6 @@ The resulting audit state is locked by the service."
   (let* ((file (sspai--current-source-file))
          (state (sspai--state file)))
     (sspai--write-state file state 'audit)))
-
-;;;###autoload
-(defun sspai-sync ()
-  "Push the current local source according to its publication status.
-Local content is authoritative.  Never replace it with remote article content."
-  (interactive)
-  (let* ((file (sspai--current-source-file))
-         (state (sspai--state file)))
-    (sspai--write-state file state
-                        (sspai--action-from-meta (plist-get state :meta)))))
 
 ;;;###autoload
 (defun sspai-status ()
@@ -2486,102 +2325,13 @@ Local content is authoritative.  Never replace it with remote article content."
        ""))
     status))
 
-(defun sspai--cached-banner-pair (file meta)
-  "Return a verified cached banner pair for FILE and META, or nil."
-  (let ((banner (plist-get meta :banner))
-        (key (plist-get meta :banner-key))
-        (id (or (plist-get meta :banner-id) 0)))
-    (when (and banner key (> id 0))
-      (cond
-       ((string-match-p "\\`https://" banner)
-        (and (string-equal
-              key (or (sspai--cdn-key-from-url banner) ""))
-             (cons key id)))
-       (t
-        (let ((pair
-              (sspai--image-bytes-and-mime
-                banner
-                (file-name-directory
-                 (expand-file-name file)))))
-          (and (not (eq pair 'external))
-               (string-equal
-                (secure-hash 'sha256 (cdr pair))
-                (or (plist-get meta :banner-hash) ""))
-               (cons key id))))))))
-
-;;;###autoload
-(defun sspai-show-payload ()
-  "Show a token-redacted article payload for the current source.
-This preview converts the body but performs no image upload.  A changed local
-banner therefore appears empty until a real write obtains a new attachment id."
-  (interactive)
-  (let* ((file (sspai--current-source-file))
-         (source (sspai--read-source file))
-         (meta (car source))
-         (raw-body (cadr source))
-         (html (sspai--source-to-html file raw-body))
-         (banner-pair (sspai--cached-banner-pair file meta))
-         (remote
-          (and (plist-get meta :id)
-               (sspai--article-get
-                (plist-get meta :id))))
-         (action (sspai--action-from-meta meta))
-         (payload
-          (if remote
-              (sspai--full-update-payload
-               remote meta html banner-pair action)
-            (sspai--article-add-payload
-             meta html banner-pair))))
-    (when (sspai--object-member-p payload 'token)
-      (setq payload
-            (sspai--object-set
-             payload 'token "<redacted>")))
-    (with-current-buffer
-        (get-buffer-create "*sspai-payload*")
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert
-         (json-serialize
-          payload :null-object nil
-          :false-object :json-false))
-        (json-pretty-print-buffer)
-        (goto-char (point-min))
-        (special-mode)
-        (display-buffer (current-buffer))))))
-
-;;;###autoload
-(defun sspai-open-remote ()
-  "Open the tracked article's public SSPAI URL."
-  (interactive)
-  (pcase-let* ((file (sspai--current-source-file))
-                (`(,meta ,_body)
-                 (sspai--read-source file))
-                (url (plist-get meta :url)))
-    (unless url
-      (user-error "sspai: 源稿尚无远端 article id"))
-    (browse-url url)))
-
-;;;###autoload
-(defun sspai-open-preview ()
-  "Open the tracked article in SSPAI's web editor."
-  (interactive)
-  (pcase-let* ((file (sspai--current-source-file))
-                (`(,meta ,_body)
-                 (sspai--read-source file))
-                (id (plist-get meta :id)))
-    (unless id
-      (user-error "sspai: 请先创建远端草稿"))
-    (browse-url
-     (sspai--site-url (format "/write/%d" id)))))
-
-;;;; Creating and importing sources
+;;;; Creating local Org sources
 
 (defun sspai--new-meta (&optional title)
   "Return fresh source metadata with optional TITLE."
   (list
    :id nil
-   :url nil
-   :status "draft"
+   :status nil
    :title (or title "")
    :banner nil
    :tags nil
@@ -2604,25 +2354,6 @@ banner therefore appears empty until a real write obtains a new attachment id."
   (sspai--create-source
    file (sspai--new-meta title) "")
   (message "sspai: 已创建文章源稿：%s" file))
-
-;;;###autoload
-(defun sspai-import-article (id file)
-  "Import existing SSPAI article ID into new source FILE."
-  (interactive
-   (list
-    (read-number "少数派 article id: ")
-    (read-file-name
-     "导入到（.org）: "
-     default-directory nil nil)))
-  (let* ((remote (sspai--article-get id))
-         (meta
-          (sspai--meta-apply-remote
-           (sspai--new-meta) remote))
-         (body
-          (sspai--remote-html-to-source
-           file (plist-get remote :body))))
-    (sspai--create-source file meta body)
-    (message "sspai: 已导入 article %d：%s" id file)))
 
 (provide 'sspai)
 
