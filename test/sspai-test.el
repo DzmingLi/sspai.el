@@ -1,0 +1,1351 @@
+;;; sspai-test.el --- Offline regression tests for sspai.el -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026 Dzming Li
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;;; Commentary:
+
+;; These tests never contact SSPAI or Qiniu.  Network boundaries are mocked so
+;; credentials, payloads, and ambiguous-write behavior can be checked exactly.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'ert)
+
+(setq load-prefer-newer t)
+(add-to-list
+ 'load-path
+ (file-name-directory
+  (directory-file-name
+   (file-name-directory (or load-file-name buffer-file-name)))))
+(require 'sspai)
+
+(defconst sspai-test--hash-a (make-string 64 ?a))
+(defconst sspai-test--hash-b (make-string 64 ?b))
+
+(defun sspai-test--with-temp-file (suffix contents callback)
+  "Create a temporary SUFFIX file with CONTENTS and call CALLBACK with it."
+  (let ((file (make-temp-file "sspai-test-" nil suffix)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert contents))
+          (funcall callback file))
+      (when-let* ((buffer (find-buffer-visiting file)))
+        (with-current-buffer buffer
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (ignore-errors (delete-file file)))))
+
+(defun sspai-test--read-text (file)
+  "Return FILE contents as a string."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (buffer-string)))
+
+(defun sspai-test--response (status body &optional headers url)
+  "Build a synthetic HTTP response with STATUS, BODY, HEADERS, and URL."
+  (sspai--make-response
+   :status status
+   :headers headers
+   :body body
+   :url (or url "https://sspai.com/api/v1/test")))
+
+(defun sspai-test--metadata (title)
+  "Return minimal normalized metadata for TITLE."
+  (sspai--meta-from-object
+   '((status . "draft")
+     (allow-comment . t))
+   title nil nil))
+
+(defun sspai-test--plist-with (plist &rest pairs)
+  "Return a copy of PLIST updated with PAIRS."
+  (let ((copy (copy-sequence plist)))
+    (while pairs
+      (setq copy (plist-put copy (pop pairs) (pop pairs))))
+    copy))
+
+(defun sspai-test--article-object (&optional type)
+  "Return a synthetic raw Matrix article object of TYPE."
+  (copy-tree
+   `((id . 42)
+     (token . "ARTICLE-TOKEN")
+     (type . ,(or type 4))
+     (free . t)
+     (title . "Published title")
+     (title_last . "Draft title")
+     (body . "<p>Published body</p>")
+     (body_last . "<p>Draft body</p>")
+     (words_count . 2)
+     (words_count_last . 2)
+     (banner . "attachments/old-banner.png")
+     (banner_id . 8)
+     (allow_comment . t)
+     (tags . (((id . 101) (title . "Official"))))
+     (custom_tags . ("Custom"))
+     (delete_status . :json-false)
+     (created_at . 100)
+     (released_at . 90)
+     (body_updated_at . 120)
+     (benefits_statement_on . :json-false)
+     (benefits_statement_id . 0)
+     (future_server_field . "preserve-me"))
+   t))
+
+(ert-deftest sspai-test-markdown-uses-only-generic-top-level-banner ()
+  (sspai-test--with-temp-file
+   ".md"
+   (concat
+    "---\n"
+    "title: Canonical\n"
+    "banner: ./canonical.png\n"
+    "cover: ./old-generic-cover.png\n"
+    "zhihu:\n"
+    "  banner: ./platform-zhihu.png\n"
+    "sspai:\n"
+    "  banner: ./platform-sspai.png\n"
+    "---\n"
+    "Body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (should (equal (plist-get meta :banner) "./canonical.png"))
+       (should (equal (string-trim body) "Body"))))))
+
+(ert-deftest sspai-test-markdown-does-not-fallback-to-cover-or-platform-banner ()
+  (sspai-test--with-temp-file
+   ".md"
+   (concat
+    "---\n"
+    "title: No generic banner\n"
+    "cover: ./old-generic-cover.png\n"
+    "zhihu:\n"
+    "  banner: ./platform-zhihu.png\n"
+    "sspai:\n"
+    "  banner: ./platform-sspai.png\n"
+    "---\n"
+    "Body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,_body) (sspai--read-source file)))
+       (should-not (plist-get meta :banner))))))
+
+(ert-deftest sspai-test-org-uses-only-generic-banner-keyword ()
+  (sspai-test--with-temp-file
+   ".org"
+   (concat
+    "#+TITLE: Canonical\n"
+    "#+BANNER: ./canonical.png\n"
+    "#+COVER: ./old-generic-cover.png\n"
+    "#+ZHIHU_BANNER: ./platform-zhihu.png\n"
+    "#+SSPAI_BANNER: ./platform-sspai.png\n"
+    "\n"
+    "Body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (should (equal (plist-get meta :banner) "./canonical.png"))
+       (should (equal (string-trim body) "Body"))))))
+
+(ert-deftest sspai-test-org-does-not-fallback-to-cover-or-platform-banner ()
+  (sspai-test--with-temp-file
+   ".org"
+   (concat
+    "#+TITLE: No generic banner\n"
+    "#+COVER: ./old-generic-cover.png\n"
+    "#+ZHIHU_BANNER: ./platform-zhihu.png\n"
+    "#+SSPAI_BANNER: ./platform-sspai.png\n"
+    "\n"
+    "Body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,_body) (sspai--read-source file)))
+       (should-not (plist-get meta :banner))))))
+
+(ert-deftest sspai-test-markdown-uses-only-banner-checkpoint-field-names ()
+  (sspai-test--with-temp-file
+   ".md"
+   (concat
+    "---\n"
+    "title: Banner checkpoint\n"
+    "sspai:\n"
+    "  status: draft\n"
+    "  banner-id: 9\n"
+    "  banner-key: attachments/banner.png\n"
+    "  banner-hash: " sspai-test--hash-a "\n"
+    "  cover-key: attachments/old.png\n"
+    "  cover-hash: " sspai-test--hash-b "\n"
+    "---\n"
+    "Body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (should (equal (plist-get meta :banner-key)
+                      "attachments/banner.png"))
+       (should (equal (plist-get meta :banner-hash)
+                      sspai-test--hash-a))
+       (sspai--write-source file meta body)
+       (let ((text (sspai-test--read-text file)))
+         (should (string-match-p "^  banner-key: " text))
+         (should (string-match-p "^  banner-hash: " text))
+         (should-not (string-match-p "^  cover-key: " text))
+         (should-not (string-match-p "^  cover-hash: " text)))))))
+
+(ert-deftest sspai-test-org-uses-only-banner-checkpoint-field-names ()
+  (sspai-test--with-temp-file
+   ".org"
+   (concat
+    "#+TITLE: Banner checkpoint\n"
+    "#+SSPAI_STATUS: draft\n"
+    "#+SSPAI_BANNER_ID: 9\n"
+    "#+SSPAI_BANNER_KEY: attachments/banner.png\n"
+    "#+SSPAI_BANNER_HASH: " sspai-test--hash-a "\n"
+    "#+SSPAI_COVER_KEY: attachments/old.png\n"
+    "#+SSPAI_COVER_HASH: " sspai-test--hash-b "\n"
+    "\n"
+    "Body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (should (equal (plist-get meta :banner-key)
+                      "attachments/banner.png"))
+       (should (equal (plist-get meta :banner-hash)
+                      sspai-test--hash-a))
+       (sspai--write-source file meta body)
+       (let ((text (sspai-test--read-text file)))
+         (should (string-match-p "^#\\+SSPAI_BANNER_KEY: " text))
+         (should (string-match-p "^#\\+SSPAI_BANNER_HASH: " text))
+         (should-not (string-match-p "^#\\+SSPAI_COVER_KEY: " text))
+         (should-not (string-match-p "^#\\+SSPAI_COVER_HASH: "
+                                     text)))))))
+
+(ert-deftest sspai-test-markdown-checkpoint-preserves-unowned-metadata ()
+  (sspai-test--with-temp-file
+   ".md"
+   (concat
+    "---\n"
+    "title: Before\n"
+    "banner: ./banner.png\n"
+    "author: Alice\n"
+    "custom:\n"
+    "  nested: keep-me\n"
+    "sspai:\n"
+    "  status: draft\n"
+    "---\n"
+    "Original body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (setf (plist-get meta :title) "After"
+             (plist-get meta :id) 42
+             (plist-get meta :url) "https://sspai.com/post/42")
+       (sspai--write-source file meta body)
+       (let ((text (sspai-test--read-text file)))
+         (should (string-match-p "^title: \"After\"$" text))
+         (should (string-match-p "^banner: \"./banner.png\"$" text))
+         (should (string-match-p "^author: Alice$" text))
+         (should (string-match-p "^custom:$" text))
+         (should (string-match-p "^  nested: keep-me$" text))
+         (should (string-match-p "^  id: 42$" text))
+         (should (equal (string-trim
+                         (cadr (sspai--md-split-frontmatter text)))
+                        "Original body")))))))
+
+(ert-deftest sspai-test-org-checkpoint-preserves-unowned-keywords ()
+  (sspai-test--with-temp-file
+   ".org"
+   (concat
+    "#+TITLE: Before\n"
+    "#+BANNER: ./banner.png\n"
+    "#+AUTHOR: Alice\n"
+    "#+PROPERTY: header-args :eval never\n"
+    "#+SSPAI_STATUS: draft\n"
+    "\n"
+    "Original body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (setf (plist-get meta :title) "After"
+             (plist-get meta :id) 42
+             (plist-get meta :url) "https://sspai.com/post/42")
+       (sspai--write-source file meta body)
+       (let ((text (sspai-test--read-text file)))
+         (should (string-match-p "^#\\+TITLE: After$" text))
+         (should (string-match-p "^#\\+BANNER: ./banner.png$" text))
+         (should (string-match-p "^#\\+AUTHOR: Alice$" text))
+         (should (string-match-p
+                  "^#\\+PROPERTY: header-args :eval never$" text))
+         (should (string-match-p "^#\\+SSPAI_ID: 42$" text))
+         (should
+          (=
+           (with-temp-buffer
+             (insert text)
+             (goto-char (point-min))
+             (how-many "^#\\+SSPAI_STATUS:"))
+           1)))))))
+
+(ert-deftest sspai-test-org-nonempty-image-cache-roundtrips ()
+  (sspai-test--with-temp-file
+   ".org"
+   (concat
+    "#+TITLE: Cached image\n"
+    "#+SSPAI_STATUS: draft\n"
+    "#+SSPAI_IMAGE_CACHE: {\""
+    sspai-test--hash-a
+    "\":\"https://cdnfile.sspai.com/a.png\"}\n"
+    "\n"
+    "Body\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (should
+        (equal
+         (gethash sspai-test--hash-a
+                  (plist-get meta :image-cache))
+         "https://cdnfile.sspai.com/a.png"))
+       (sspai--write-source file meta body)
+       (pcase-let ((`(,roundtrip ,roundtrip-body)
+                     (sspai--read-source file)))
+         (should
+          (equal
+           (gethash sspai-test--hash-a
+                    (plist-get roundtrip :image-cache))
+           "https://cdnfile.sspai.com/a.png"))
+         (should (equal (string-trim roundtrip-body) "Body")))))))
+
+(ert-deftest sspai-test-markdown-blank-separator-checkpoint-is-idempotent ()
+  (sspai-test--with-temp-file
+   ".md"
+   (concat
+    "---\n"
+    "title: Conventional\n"
+    "author: Alice\n"
+    "sspai:\n"
+    "  status: draft\n"
+    "---\n"
+    "\n"
+    "First paragraph.\n"
+    "\n"
+    "Second paragraph.\n")
+   (lambda (file)
+     (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+       (sspai--write-source file meta body)
+       (let ((once (sspai-test--read-text file)))
+         (should (string-match-p
+                  "---\n\nFirst paragraph\\.\n\nSecond paragraph\\.\n\\'"
+                  once))
+         (pcase-let ((`(,again-meta ,again-body)
+                       (sspai--read-source file)))
+           (sspai--write-source file again-meta again-body))
+         (should (equal (sspai-test--read-text file) once)))))))
+
+(ert-deftest sspai-test-atomic-checkpoint-rejects-symbolic-link ()
+  (let* ((target (make-temp-file "sspai-target-" nil ".md" "original\n"))
+         (link (concat target ".link")))
+    (unwind-protect
+        (progn
+          (make-symbolic-link target link)
+          (should-error
+           (sspai--atomic-write-text link "replacement\n")
+           :type 'user-error)
+          (should (equal (sspai-test--read-text target) "original\n")))
+      (ignore-errors (delete-file link))
+      (ignore-errors (delete-file target)))))
+
+(ert-deftest sspai-test-account-bearer-is-never-checkpointed ()
+  (let ((sspai-access-token "ACCOUNT-BEARER-MUST-NOT-BE-WRITTEN"))
+    (sspai-test--with-temp-file
+     ".md"
+     "---\ntitle: Secret boundary\nsspai:\n  status: draft\n---\nBody\n"
+     (lambda (file)
+       (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+         (setf (plist-get meta :id) 7
+               (plist-get meta :url) "https://sspai.com/post/7")
+         (sspai--write-source file meta body)
+         (should-not
+          (string-match-p
+           (regexp-quote sspai-access-token)
+           (sspai-test--read-text file))))))))
+
+(ert-deftest sspai-test-platform-secret-fields-are-cleared-on-checkpoint ()
+  (dolist
+      (fixture
+       `((".md"
+          . ,(concat
+              "---\n"
+              "title: Secret cleanup\n"
+              "sspai:\n"
+              "  status: draft\n"
+              "  token: ARTICLE-TOKEN\n"
+              "  qiniu-token: QINIU-TOKEN\n"
+              "---\n"
+              "Body\n"))
+         (".org"
+          . ,(concat
+              "#+TITLE: Secret cleanup\n"
+              "#+SSPAI_STATUS: draft\n"
+              "#+SSPAI_TOKEN: ARTICLE-TOKEN\n"
+              "#+SSPAI_QINIU_TOKEN: QINIU-TOKEN\n"
+              "#+SSPAI_BANNER: ./legacy-platform-banner.png\n"
+              "\n"
+              "Body\n"))))
+    (sspai-test--with-temp-file
+     (car fixture) (cdr fixture)
+     (lambda (file)
+       (pcase-let ((`(,meta ,body) (sspai--read-source file)))
+         (sspai--write-source file meta body)
+         (let ((text (sspai-test--read-text file)))
+           (should-not (string-match-p "ARTICLE-TOKEN" text))
+           (should-not (string-match-p "QINIU-TOKEN" text))
+           (should-not
+            (string-match-p "legacy-platform-banner" text))))))))
+
+(ert-deftest sspai-test-api-envelope-returns-data ()
+  (cl-letf (((symbol-function 'sspai--http)
+             (lambda (&rest _)
+               (sspai-test--response
+                200 "{\"error\":0,\"data\":{\"id\":42}}"))))
+    (should
+     (equal (sspai--api-data "GET" "/test")
+            '((id . 42))))))
+
+(ert-deftest sspai-test-json-empty-array-remains-an-array ()
+  (let* ((object (sspai--parse-json "{\"tags\":[]}"))
+         (tags (sspai--object-get object 'tags)))
+    (should (vectorp tags))
+    (should
+     (equal
+      (json-serialize object :null-object nil :false-object :json-false)
+      "{\"tags\":[]}"))))
+
+(ert-deftest sspai-test-api-envelope-error-is-not-http-success ()
+  (cl-letf (((symbol-function 'sspai--http)
+             (lambda (&rest _)
+               (sspai-test--response
+                200 "{\"error\":1001,\"msg\":\"denied\",\"data\":null}"))))
+    (should-error
+     (sspai--api-request "GET" "/test")
+     :type 'sspai-api-error)))
+
+(ert-deftest sspai-test-api-rejects-http-error-and-empty-success ()
+  (cl-letf (((symbol-function 'sspai--http)
+             (lambda (&rest _)
+               (sspai-test--response
+                500 "{\"error\":500,\"msg\":\"broken\"}"))))
+    (should-error
+     (sspai--api-request "GET" "/test")
+     :type 'sspai-api-error))
+  (cl-letf (((symbol-function 'sspai--http)
+             (lambda (&rest _)
+               (sspai-test--response 204 ""))))
+    (should-error
+     (sspai--api-request "GET" "/test")
+     :type 'sspai-api-error)))
+
+(ert-deftest sspai-test-editor-status-mapping ()
+  (should (= (sspai--status-type "draft") 4))
+  (should (= (sspai--status-type "published") 5))
+  (should (= (sspai--status-type "community") 5))
+  (should (= (sspai--status-type "audit") 2))
+  (should (= (sspai--status-type "review") 2))
+  (should (equal (sspai--type-status 4) "draft"))
+  (should (equal (sspai--type-status 5) "published"))
+  (should (equal (sspai--type-status 2) "audit"))
+  (should-error (sspai--status-type "featured")
+                :type 'user-error))
+
+(ert-deftest sspai-test-normalize-article-prefers-editor-last-fields ()
+  (let ((article
+         (sspai--normalize-article
+          (sspai-test--article-object))))
+    (should (= (plist-get article :id) 42))
+    (should (equal (plist-get article :token) "ARTICLE-TOKEN"))
+    (should (equal (plist-get article :title) "Draft title"))
+    (should (equal (plist-get article :body) "<p>Draft body</p>"))
+    (should (equal (plist-get article :published-title)
+                   "Published title"))
+    (should (equal (plist-get article :published-body)
+                   "<p>Published body</p>"))
+    (should (equal (plist-get article :tags)
+                   '("Official" "Custom")))
+    (should (equal (plist-get article :banner-key)
+                   "attachments/old-banner.png"))
+    (should
+     (equal
+      (sspai--object-get
+       (plist-get article :raw) 'future_server_field)
+      "preserve-me"))))
+
+(ert-deftest sspai-test-article-get-uses-single-info-and-keeps-token-in-memory ()
+  (let (observed)
+    (cl-letf
+        (((symbol-function 'sspai--api-data)
+          (lambda (method path &optional query payload)
+            (setq observed (list method path query payload))
+            (sspai-test--article-object))))
+      (let ((article (sspai--article-get 42)))
+        (should
+         (equal
+          observed
+          '("GET"
+            "/matrix/editor/article/single/info/get"
+            ((id . 42))
+            nil)))
+        (should (equal (plist-get article :token)
+                       "ARTICLE-TOKEN"))))))
+
+(ert-deftest sspai-test-article-add-payload-is-exact-and-tags-are-custom ()
+  (let* ((meta
+          (sspai-test--plist-with
+           (sspai-test--metadata "New article")
+           :tags '("Official-looking" "Custom")
+           :allow-comment nil))
+         (payload
+          (sspai--article-add-payload
+           meta "<p>Body</p>" '("attachments/banner.png" . 9))))
+    (should
+     (equal
+      payload
+      `((type . 4)
+        (banner . "attachments/banner.png")
+        (banner_id . 9)
+        (title . "New article")
+        (title_last . "New article")
+        (body . "<p>Body</p>")
+        (body_last . "<p>Body</p>")
+        (allow_comment . :json-false)
+        (tags . ,[])
+        (custom_tags . ,["Official-looking" "Custom"])
+        (delete_status . :json-false))))))
+
+(ert-deftest sspai-test-article-create-ambiguous-result-is-never-retried ()
+  (let ((calls 0))
+    (cl-letf
+        (((symbol-function 'sspai--api-data)
+          (lambda (&rest _arguments)
+            (setq calls (1+ calls))
+            (signal 'sspai-api-error '("network failed")))))
+      (should-error
+       (sspai--article-add '((type . 4)))
+       :type 'sspai-create-result-unknown)
+      (should (= calls 1))))
+  (let ((calls 0))
+    (cl-letf
+        (((symbol-function 'sspai--api-data)
+          (lambda (&rest _arguments)
+            (setq calls (1+ calls))
+            (signal 'sspai-api-error
+                    '("invalid article" 422 "/article/add")))))
+      (should-error
+       (sspai--article-add '((type . 4)))
+       :type 'sspai-api-error)
+      (should (= calls 1)))))
+
+(ert-deftest sspai-test-auto-save-payload-is-exact-and-requires-token ()
+  (let ((remote
+         (sspai--normalize-article
+          (sspai-test--article-object))))
+    (cl-letf (((symbol-function 'float-time)
+               (lambda (&optional _time) 1234.9)))
+      (should
+       (equal
+        (sspai--article-auto-save-payload
+         remote "Edited" "<p>Edited</p>")
+        '((id . 42)
+          (token . "ARTICLE-TOKEN")
+          (title_last . "Edited")
+          (body_last . "<p>Edited</p>")
+          (update_at . 1234))))))
+  (let ((remote
+         (sspai--normalize-article
+          (sspai-test--article-object))))
+    (setf (plist-get remote :token) nil)
+    (should-error
+     (sspai--article-auto-save-payload remote "Edited" "<p>Edited</p>")
+     :type 'sspai-api-error)))
+
+(ert-deftest sspai-test-full-update-preserves-standard-tags-and-unknown-fields ()
+  (let* ((remote
+          (sspai--normalize-article
+           (sspai-test--article-object 5)))
+         (meta
+          (sspai-test--plist-with
+           (sspai-test--metadata "Local title")
+           :tags '("Official" "New custom")))
+         (payload
+          (sspai--full-update-payload
+           remote meta "<p>Local body</p>"
+           '("attachments/new-banner.png" . 17)
+           'draft)))
+    (should (= (sspai--object-get payload 'type) 5))
+    (should (equal (sspai--object-get payload 'token)
+                   "ARTICLE-TOKEN"))
+    (should (equal (sspai--object-get payload 'title)
+                   "Published title"))
+    (should (equal (sspai--object-get payload 'body)
+                   "<p>Published body</p>"))
+    (should (equal (sspai--object-get payload 'title_last)
+                   "Local title"))
+    (should (equal (sspai--object-get payload 'body_last)
+                   "<p>Local body</p>"))
+    (should
+     (equal
+      (append (sspai--object-get payload 'tags) nil)
+      '(((id . 101) (title . "Official")))))
+    (should
+     (equal
+      (append (sspai--object-get payload 'custom_tags) nil)
+      '("New custom")))
+    (should (equal
+             (sspai--object-get payload 'future_server_field)
+             "preserve-me"))))
+
+(ert-deftest sspai-test-community-and-audit-update-different-fields ()
+  (let* ((remote
+          (sspai--normalize-article
+           (sspai-test--article-object 4)))
+         (meta (sspai-test--metadata "Local title"))
+         (community
+          (sspai--full-update-payload
+           remote meta "<p>Local body</p>" nil 'community))
+         (audit
+          (sspai--full-update-payload
+           remote meta "<p>Local body</p>" nil 'audit)))
+    (should (= (sspai--object-get community 'type) 5))
+    (should (equal (sspai--object-get community 'title)
+                   "Local title"))
+    (should (equal (sspai--object-get community 'body)
+                   "<p>Local body</p>"))
+    (should (= (sspai--object-get audit 'type) 2))
+    (should (equal (sspai--object-get audit 'title)
+                   "Published title"))
+    (should (equal (sspai--object-get audit 'body)
+                   "<p>Published body</p>"))))
+
+(ert-deftest sspai-test-locked-or-paid-article-cannot-be-updated ()
+  (let ((meta (sspai-test--metadata "Local")))
+    (should-error
+     (sspai--full-update-payload
+      (sspai--normalize-article
+       (sspai-test--article-object 2))
+      meta "<p>Body</p>" nil 'draft)
+     :type 'user-error)
+    (let ((object (sspai-test--article-object 5)))
+      (setf (alist-get 'free object) :json-false)
+      (should-error
+       (sspai--full-update-payload
+        (sspai--normalize-article object)
+        meta "<p>Body</p>" nil 'draft)
+       :type 'user-error))))
+
+(ert-deftest sspai-test-firefox-token-is-url-scoped-and-refreshed ()
+  (let* ((sspai-access-token nil)
+         (calls 0)
+         (sspai-cookie-function
+          (lambda (url)
+            (should (equal url "https://sspai.com/api/v1/test"))
+            (list (cons "sspai_jwt_token"
+                        (format "JWT%%2E%d" (cl-incf calls)))
+                  '("sspai_cross_token" . "DO-NOT-USE")))))
+    (should (equal (sspai--access-token "https://sspai.com/api/v1/test")
+                   "JWT.1"))
+    (should (equal (sspai--access-token "https://sspai.com/api/v1/test")
+                   "JWT.2"))))
+
+(ert-deftest sspai-test-explicit-token-skips-browser-and-auth-source ()
+  (let ((sspai-access-token " EXPLICIT ")
+        (sspai-cookie-function (lambda (_) (ert-fail "read browser"))))
+    (cl-letf (((symbol-function 'auth-source-search)
+               (lambda (&rest _) (ert-fail "read auth-source"))))
+      (should (equal (sspai--access-token) "EXPLICIT")))))
+
+(ert-deftest sspai-test-firefox-missing-or-invalid-login-stops-before-request ()
+  (dolist (value '(nil "" "  " "%20" "JWT%0D%0AX-Evil%3Ayes"))
+    (let ((sspai-access-token nil)
+          (sspai-cookie-function
+           (lambda (_) (list (cons "sspai_jwt_token" value)))))
+      (cl-letf (((symbol-function 'url-retrieve-synchronously)
+                 (lambda (&rest _) (ert-fail "sent request without login")))
+                ((symbol-function 'auth-source-search)
+                 (lambda (&rest _) (ert-fail "silently changed account"))))
+        (should-error (sspai--http "GET" "https://sspai.com/api/v1/test"
+                                   :auth t)
+                      :type 'user-error)))))
+
+(ert-deftest sspai-test-auth-source-remains-available-without-cookie-provider ()
+  (let ((sspai-access-token nil)
+        (sspai-cookie-function nil))
+    (cl-letf (((symbol-function 'auth-source-search)
+               (lambda (&rest args)
+                 (should (equal (plist-get args :host) "sspai.com"))
+                 (should (equal (plist-get args :user) "sspai.el"))
+                 (list (list :secret (lambda () " AUTH-SOURCE "))))))
+      (should (equal (sspai--access-token) "AUTH-SOURCE")))))
+
+(ert-deftest sspai-test-unauthenticated-upload-never-reads-firefox ()
+  (let ((sspai-access-token nil)
+        (sspai-cookie-function (lambda (_) (ert-fail "read browser"))))
+    (cl-letf (((symbol-function 'url-retrieve-synchronously)
+               (lambda (&rest _)
+                 (should-not (assoc-string "Authorization"
+                                           url-request-extra-headers t))
+                 (should-not (assoc-string "Cookie"
+                                           url-request-extra-headers t))
+                 (let ((buffer (generate-new-buffer " *sspai-upload-test*")))
+                   (with-current-buffer buffer
+                     (insert "HTTP/1.1 204 No Content\r\n\r\n")
+                     (setq-local url-http-response-status 204)
+                     (setq-local url-http-end-of-headers (point-max)))
+                   buffer))))
+      (should (= (sspai--response-status
+                  (sspai--http "POST" "https://upload.qiniup.com/"))
+                 204)))))
+
+(ert-deftest sspai-test-http-adds-bearer-only-for-authorized-api ()
+  (let ((sspai-access-token "ACCOUNT-BEARER")
+        observed)
+    (cl-letf
+        (((symbol-function 'url-retrieve-synchronously)
+          (lambda (url &rest _arguments)
+            (setq observed
+                  (list
+                   :url url
+                   :method url-request-method
+                   :headers url-request-extra-headers))
+            (let ((buffer (generate-new-buffer " *sspai-http-test*")))
+              (with-current-buffer buffer
+                (insert
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: application/json\r\n"
+                 "\r\n"
+                 "{\"error\":0,\"data\":{}}")
+                (setq-local url-http-response-status 200)
+                (goto-char (point-min))
+                (search-forward "\r\n\r\n")
+                (setq-local url-http-end-of-headers (point)))
+              buffer))))
+      (let ((response
+             (sspai--http
+              "GET" "https://sspai.com/api/v1/test" :auth t)))
+        (should (= (sspai--response-status response) 200))
+        (should (equal (plist-get observed :url)
+                       "https://sspai.com/api/v1/test"))
+        (should
+         (equal
+          (cdr
+           (assoc-string
+            "Authorization" (plist-get observed :headers) t))
+          "Bearer ACCOUNT-BEARER"))))))
+
+(ert-deftest sspai-test-firefox-auth-preserves-chinese-request-bytes ()
+  (let* ((sspai-access-token nil)
+         (sspai-cookie-function
+          (lambda (_) (list (cons "sspai_jwt_token"
+                                  (string-to-multibyte "BROWSER-JWT")))))
+         (data (encode-coding-string "{\"title\":\"数码编年史\"}" 'utf-8 t)))
+    (cl-letf (((symbol-function 'url-retrieve-synchronously)
+               (lambda (url &rest _)
+                 (with-temp-buffer
+                   (setq-local url-http-target-url (url-generic-parse-url url)
+                               url-http-method url-request-method
+                               url-http-data url-request-data
+                               url-http-extra-headers url-request-extra-headers
+                               url-http-proxy nil
+                               url-http-referer nil
+                               url-http-extensions-header nil)
+                   (let ((request (url-http-create-request)))
+                     (should (= (length request) (string-bytes request)))
+                     (should (string-suffix-p data request))
+                     (should (string-match-p
+                              (format "Content-length: %d" (length data)) request))))
+                 (let ((buffer (generate-new-buffer " *sspai-unicode-test*")))
+                   (with-current-buffer buffer
+                     (insert "HTTP/1.1 204 No Content\r\n\r\n")
+                     (setq-local url-http-response-status 204)
+                     (setq-local url-http-end-of-headers (point-max)))
+                   buffer))))
+      (sspai--http "POST" "https://sspai.com/api/v1/test" :auth t
+                   :content-type "application/json" :data data))))
+
+(ert-deftest sspai-test-http-isolates-ambient-cookie-jars ()
+  (let ((sspai-access-token "ACCOUNT-BEARER")
+        (url-cookie-file "/tmp/must-not-load-cookies")
+        (url-cookie-storage '(("sspai.com" "ambient-cookie")))
+        (url-cookie-secure-storage '(("sspai.com" "ambient-secure-cookie")))
+        observed)
+    (cl-letf
+        (((symbol-function 'url-retrieve-synchronously)
+          (lambda (_url &rest _arguments)
+            (setq observed
+                  (list
+                   url-cookie-file
+                   url-cookie-storage
+                   url-cookie-secure-storage))
+            (let ((buffer (generate-new-buffer " *sspai-cookie-test*")))
+              (with-current-buffer buffer
+                (insert "HTTP/1.1 204 No Content\r\n\r\n")
+                (setq-local url-http-response-status 204)
+                (setq-local url-http-end-of-headers (point-max)))
+              buffer))))
+      (sspai--http "GET" "https://sspai.com/api/v1/test" :auth t)
+      (should (equal observed '(nil nil nil))))))
+
+(ert-deftest sspai-test-cross-origin-auth-is-rejected-before-token-read ()
+  (let (token-read transport-called)
+    (cl-letf
+        (((symbol-function 'sspai--access-token)
+          (lambda ()
+            (setq token-read t)
+            "ACCOUNT-BEARER"))
+         ((symbol-function 'url-retrieve-synchronously)
+          (lambda (&rest _arguments)
+            (setq transport-called t)
+            (error "transport must not run"))))
+      (should-error
+       (sspai--http "GET" "https://evil.example/steal" :auth t))
+      (should-not token-read)
+      (should-not transport-called))))
+
+(ert-deftest sspai-test-transport-error-redacts-account-bearer ()
+  (let ((sspai-access-token "DO-NOT-LEAK"))
+    (cl-letf
+        (((symbol-function 'url-retrieve-synchronously)
+          (lambda (&rest _arguments)
+            (error
+             "connection failed with Authorization: Bearer DO-NOT-LEAK"))))
+      (let ((message-text
+             (condition-case err
+                 (progn
+                   (sspai--http
+                    "GET" "https://sspai.com/api/v1/test" :auth t)
+                   "")
+               (sspai-api-error (error-message-string err)))))
+        (should-not (string-match-p "DO-NOT-LEAK" message-text))
+        (should (string-match-p "<redacted>" message-text))))))
+
+(ert-deftest sspai-test-transport-error-redacts-article-token-in-payload ()
+  (let ((sspai-access-token "ACCOUNT-BEARER")
+        (article-token "ARTICLE-TOKEN-MUST-NOT-LEAK"))
+    (cl-letf
+        (((symbol-function 'url-retrieve-synchronously)
+          (lambda (&rest _arguments)
+            (error "transport dumped request token %s" article-token))))
+      (let ((message-text
+             (condition-case err
+                 (progn
+                   (sspai--api-request
+                    "POST" "/matrix/editor/article/auto/save"
+                    :payload
+                    `((id . 42)
+                      (token . ,article-token)
+                      (title_last . "Title")
+                      (body_last . "<p>Body</p>")
+                      (update_at . 1)))
+                   "")
+               (sspai-api-error (error-message-string err)))))
+        (should-not (string-match-p
+                     (regexp-quote article-token) message-text))))))
+
+(ert-deftest sspai-test-qiniu-never-receives-account-bearer ()
+  (let ((sspai-access-token "ACCOUNT-BEARER-MUST-NOT-LEAVE-SSPAI")
+        seen)
+    (cl-letf
+        (((symbol-function 'sspai--http)
+          (lambda (method url &rest arguments)
+            (setq seen (list method url arguments))
+            (sspai-test--response
+             200 "{\"key\":\"attachments/image.png\",\"hash\":\"etag\"}"
+             nil url))))
+      (let ((result
+             (sspai--qiniu-upload
+              "image.png" "image/png"
+              (encode-coding-string "PNG" 'binary t)
+              '((token . "SHORT-LIVED-QINIU-TOKEN")
+                (key . "attachments/image.png")
+                (id . 9)))))
+        (should (equal (plist-get result :key)
+                       "attachments/image.png"))
+        (should (equal (car seen) "POST"))
+        (should (equal (cadr seen) "https://upload.qiniup.com/"))
+        (should-not (plist-get (caddr seen) :auth))
+        (should-not
+         (string-match-p
+          (regexp-quote sspai-access-token)
+          (decode-coding-string
+           (plist-get (caddr seen) :data) 'utf-8 t)))))))
+
+(ert-deftest sspai-test-local-upload-first-gets-credential-then-uses-qiniu ()
+  (let (calls)
+    (cl-letf
+        (((symbol-function 'sspai--attachment-token)
+          (lambda (filename)
+            (push (list 'credential filename) calls)
+            '((token . "SHORT-LIVED")
+              (key . "attachments/image.png")
+              (id . 9))))
+         ((symbol-function 'sspai--qiniu-upload)
+          (lambda (filename mime bytes credential)
+            (push
+             (list 'qiniu filename mime bytes credential)
+             calls)
+            (list
+             :url "https://cdnfile.sspai.com/attachments/image.png"
+             :key "attachments/image.png"
+             :id 9
+             :hash "etag"))))
+      (let ((result
+             (sspai--upload-image-bytes
+              (encode-coding-string "PNG" 'binary t)
+              "image/png" "test")))
+        (setq calls (nreverse calls))
+        (should (equal (mapcar #'car calls)
+                       '(credential qiniu)))
+        (should
+         (equal
+          (nth 4 (cadr calls))
+          '((token . "SHORT-LIVED")
+            (key . "attachments/image.png")
+            (id . 9))))
+        (should (= (plist-get result :id) 9))))))
+
+(ert-deftest sspai-test-upload-mime-contract-matches-current-editor ()
+  (should (equal (sspai--mime-extension "image/png") "png"))
+  (should (equal (sspai--mime-extension "image/jpeg") "jpg"))
+  (should (equal (sspai--mime-extension "image/gif") "gif"))
+  (should-error (sspai--mime-extension "image/avif")
+                :type 'user-error)
+  (should-error (sspai--mime-extension "image/apng")
+                :type 'user-error))
+
+(ert-deftest sspai-test-banner-upload-checkpoints-key-id-and-content-hash ()
+  (sspai-test--with-temp-file
+   ".png" "synthetic-png-bytes"
+   (lambda (image)
+     (let ((meta (sspai-test--metadata "Banner"))
+           (uploads 0)
+           (checkpoints 0))
+       (setf (plist-get meta :banner) image)
+       (cl-letf
+           (((symbol-function 'sspai--upload-image-bytes)
+             (lambda (_bytes mime context)
+               (setq uploads (1+ uploads))
+               (should (equal mime "image/png"))
+               (should (equal context "题图"))
+               (list
+                :url "https://cdnfile.sspai.com/attachments/banner.png"
+                :key "attachments/banner.png"
+                :id 27
+                :hash "etag"))))
+         (should
+          (equal
+           (sspai--prepare-banner
+            "/tmp/article.md"
+            meta
+            (lambda ()
+              (setq checkpoints (1+ checkpoints))
+              (should
+               (equal
+                (plist-get meta :banner-key)
+                "attachments/banner.png"))
+              (should (= (plist-get meta :banner-id) 27))))
+           '("attachments/banner.png" . 27)))
+         (should (= uploads 1))
+         (should (= checkpoints 1))
+         (should (equal (plist-get meta :banner-key)
+                        "attachments/banner.png"))
+         (should (= (plist-get meta :banner-id) 27))
+         (should
+          (string-match-p
+           "\\`[[:xdigit:]]\\{64\\}\\'"
+           (plist-get meta :banner-hash)))
+         ;; The same bytes must use the checkpoint rather than upload again.
+         (should
+          (equal
+           (sspai--prepare-banner
+            "/tmp/article.md" meta
+            (lambda () (setq checkpoints (1+ checkpoints))))
+           '("attachments/banner.png" . 27)))
+         (should (= uploads 1))
+         (should (= checkpoints 1))
+         ;; The path is not the identity: changed bytes must upload again.
+         (with-temp-file image
+           (insert "different-synthetic-png-bytes"))
+         (let ((old-hash (plist-get meta :banner-hash)))
+           (should
+            (equal
+             (sspai--prepare-banner
+              "/tmp/article.md" meta
+              (lambda () (setq checkpoints (1+ checkpoints))))
+             '("attachments/banner.png" . 27)))
+           (should-not
+            (equal old-hash (plist-get meta :banner-hash))))
+         (should (= uploads 2))
+         (should (= checkpoints 2)))))))
+
+(ert-deftest sspai-test-body-image-is-cached-before-upload-checkpoint ()
+  (let* ((bytes (encode-coding-string "PNG" 'binary t))
+         (hash (secure-hash 'sha256 bytes))
+         (cache (make-hash-table :test #'equal))
+         checkpoint-called)
+    (cl-letf
+        (((symbol-function 'sspai--upload-image-bytes)
+          (lambda (actual-bytes mime context)
+            (should (equal actual-bytes bytes))
+            (should (equal mime "image/png"))
+            (should (equal context "正文图片"))
+            (list
+             :url "https://cdnfile.sspai.com/attachments/body.png"
+             :key "attachments/body.png"
+             :id 3))))
+      (let ((rewritten
+             (sspai--rewrite-body-images
+              "<p><img src=\"data:image/png;base64,UE5H\"></p>"
+              "/tmp/"
+              cache
+              (lambda ()
+                (setq checkpoint-called t)
+                (should
+                 (equal
+                  (gethash hash cache)
+                  "https://cdnfile.sspai.com/attachments/body.png"))))))
+        (should checkpoint-called)
+        (should
+         (string-match-p
+          "src=\"https://cdnfile\\.sspai\\.com/attachments/body\\.png\""
+          rewritten))))))
+
+(ert-deftest sspai-test-body-image-cache-hit-does-not-upload-or-checkpoint ()
+  (let* ((bytes (encode-coding-string "PNG" 'binary t))
+         (hash (secure-hash 'sha256 bytes))
+         (url "https://cdnfile.sspai.com/attachments/cached.png")
+         (cache (make-hash-table :test #'equal))
+         checkpoint-called)
+    (puthash hash url cache)
+    (cl-letf
+        (((symbol-function 'sspai--upload-image-bytes)
+          (lambda (&rest _arguments)
+            (error "cached bytes must not upload"))))
+      (let ((rewritten
+             (sspai--rewrite-body-images
+              "<img src=\"data:image/png;base64,UE5H\">"
+              "/tmp/" cache
+              (lambda () (setq checkpoint-called t)))))
+        (should (string-match-p (regexp-quote url) rewritten))
+        (should-not checkpoint-called)))))
+
+(ert-deftest sspai-test-body-external-http-images-remain-external ()
+  (let ((cache (make-hash-table :test #'equal))
+        checkpoint-called)
+    (cl-letf
+        (((symbol-function 'sspai--upload-image-bytes)
+          (lambda (&rest _arguments)
+            (error "external image must not upload"))))
+      (let ((rewritten
+             (sspai--rewrite-body-images
+              (concat
+               "<p><img src=\"http://images.example/a.png\">"
+               "<img src=\"https://images.example/b.png\"></p>")
+              "/tmp/" cache
+              (lambda () (setq checkpoint-called t)))))
+        (should (string-match-p
+                 "src=\"http://images\\.example/a\\.png\"" rewritten))
+        (should (string-match-p
+                 "src=\"https://images\\.example/b\\.png\"" rewritten))
+        (should-not checkpoint-called)
+        (should (= (hash-table-count cache) 0))))))
+
+(ert-deftest sspai-test-upload-checkpoint-failure-has-dedicated-error ()
+  (should-error
+   (sspai--checkpoint-upload
+    (lambda () (error "disk full"))
+    "https://cdnfile.sspai.com/attachments/already-uploaded.png")
+   :type 'sspai-image-uploaded-but-not-checkpointed))
+
+(ert-deftest sspai-test-source-fingerprint-tracks-bytes-behind-image-path ()
+  (let* ((directory (make-temp-file "sspai-dependencies-" t))
+         (article (expand-file-name "article.md" directory))
+         (image (expand-file-name "asset.png" directory))
+         (banner (expand-file-name "banner.png" directory))
+         (meta
+          (sspai-test--plist-with
+           (sspai-test--metadata "Dependencies")
+           :banner "banner.png"))
+         first second third)
+    (unwind-protect
+        (progn
+          (with-temp-file article
+            (insert "placeholder\n"))
+          (with-temp-file image
+            (insert "first-image-bytes"))
+          (with-temp-file banner
+            (insert "first-banner-bytes"))
+          (setq first
+                (sspai--source-fingerprint
+                 meta "![image](asset.png)\n" article))
+          (with-temp-file image
+            (insert "different-image-bytes"))
+          (setq second
+                (sspai--source-fingerprint
+                 meta "![image](asset.png)\n" article))
+          (should-not (equal first second))
+          (with-temp-file banner
+            (insert "different-banner-bytes"))
+          (setq third
+                (sspai--source-fingerprint
+                 meta "![image](asset.png)\n" article))
+          (should-not (equal second third)))
+      (ignore-errors (delete-file banner))
+      (ignore-errors (delete-file image))
+      (ignore-errors (delete-file article))
+      (ignore-errors (delete-directory directory)))))
+
+(ert-deftest sspai-test-state-only-tracks-article-identity ()
+  (let* ((file "/tmp/offline-sspai-test.md")
+         (meta (sspai-test--metadata "Local"))
+         (remote (sspai--normalize-article (sspai-test--article-object 4))))
+    (cl-letf (((symbol-function 'sspai--read-source)
+               (lambda (_) (list meta "Local body\n")))
+              ((symbol-function 'sspai--article-get)
+               (lambda (&rest _) remote)))
+      (should (eq (plist-get (sspai--state file) :status) 'new))
+      (setq meta (plist-put meta :id 42))
+      (should (eq (plist-get (sspai--state file) :status) 'tracked))
+      ;; Changing the remote title does not introduce a conflict state.
+      (setf (plist-get remote :title) "Edited in browser")
+      (let ((state (sspai--state file)))
+        (should (eq (plist-get state :status) 'tracked))
+        (should (equal (plist-get (plist-get state :meta) :title) "Local"))
+        (should (equal (plist-get state :raw-body) "Local body\n")))
+      (setq remote nil)
+      (should (eq (plist-get (sspai--state file) :status) 'remote-deleted)))))
+
+(ert-deftest sspai-test-concurrent-local-edit-blocks-checkpoint ()
+  (let* ((file "/tmp/offline-sspai-test.md")
+         (expected (sspai-test--metadata "Expected"))
+         (changed
+          (sspai-test--plist-with expected :title "Changed")))
+    (cl-letf (((symbol-function 'sspai--read-source)
+               (lambda (_file) (list changed "Body\n"))))
+      (should-error
+       (sspai--assert-source-unchanged
+        file expected "Body\n")
+       :type 'sspai-source-changed))
+    (cl-letf (((symbol-function 'sspai--read-source)
+               (lambda (_file) (list expected "Body\n"))))
+      (should-not
+       (sspai--assert-source-unchanged
+        file expected "Body\n")))))
+
+(ert-deftest sspai-test-remote-write-checkpoint-failure-is-distinct ()
+  (let ((meta
+         (sspai-test--plist-with
+          (sspai-test--metadata "Draft title")
+          :id 42))
+        (remote
+         (sspai--normalize-article
+          (sspai-test--article-object 4))))
+    (cl-letf
+        (((symbol-function 'sspai--assert-source-unchanged)
+          (lambda (&rest _arguments) nil))
+         ((symbol-function 'sspai--write-source)
+          (lambda (&rest _arguments)
+            (error "disk full"))))
+      (should-error
+       (sspai--checkpoint-pushed
+        "/tmp/offline-sspai-test.md"
+       meta "Body\n" remote)
+       :type 'sspai-published-but-not-checkpointed))))
+
+(ert-deftest sspai-test-write-always-publishes-local-content ()
+  (let* ((remote (sspai--normalize-article (sspai-test--article-object 4)))
+         (meta (sspai-test--plist-with (sspai-test--metadata "Local") :id 42))
+         (state (list :status 'tracked :meta meta :raw-body "Local body\n"
+                      :remote remote))
+         calls)
+    (cl-letf (((symbol-function 'sspai--prepare-write-assets)
+               (lambda (_file actual-meta body)
+                 (should (equal (plist-get actual-meta :title) "Local"))
+                 (should (equal body "Local body\n"))
+                 (push 'assets calls)
+                 (list "<p>Local body</p>" nil)))
+              ((symbol-function 'sspai--auto-save-confirmed)
+               (lambda (actual-remote title html)
+                 (should (equal title "Local"))
+                 (should (equal html "<p>Local body</p>"))
+                 (push 'autosave calls) actual-remote))
+              ((symbol-function 'sspai--full-update-confirmed)
+               (lambda (_remote payload _action)
+                 (should (equal (sspai--object-get payload 'title_last) "Local"))
+                 (should (equal (sspai--object-get payload 'body_last)
+                                "<p>Local body</p>"))
+                 (push 'update calls) remote))
+              ((symbol-function 'sspai--checkpoint-pushed)
+               (lambda (&rest _) (push 'checkpoint calls)))
+              ((symbol-function 'sspai--confirm) (lambda (&rest _) nil)))
+      (sspai--write-state "/tmp/offline-sspai-test.md" state 'draft)
+      ;; Even a second save and browser-side changes use local content.
+      (setf (plist-get remote :title) "Edited in browser")
+      (sspai--write-state "/tmp/offline-sspai-test.md" state 'draft)
+      (should (equal (nreverse calls)
+                     '(assets autosave update checkpoint
+                       assets autosave update checkpoint))))))
+
+(ert-deftest sspai-test-publication-checkpoint-keeps-local-editorial-fields ()
+  (dolist (suffix '(".org" ".md"))
+    (sspai-test--with-temp-file
+     suffix
+     (if (equal suffix ".org") "#+TITLE: Local\n\nLocal body\n"
+       "---\ntitle: Local\n---\n\nLocal body\n")
+     (lambda (file)
+       (pcase-let* ((`(,meta ,body) (sspai--read-source file))
+                    (remote (sspai--normalize-article (sspai-test--article-object 4))))
+         (sspai--checkpoint-pushed file meta body remote)
+         (pcase-let ((`(,saved ,saved-body) (sspai--read-source file)))
+           (should (equal (plist-get saved :title) "Local"))
+           (should (equal saved-body body))
+           (should (= (plist-get saved :id) 42)))
+         (should-not (string-match-p "BASE_HASH\\|SOURCE_HASH\\|base-hash\\|source-hash"
+                                     (sspai-test--read-text file))))))))
+
+(ert-deftest sspai-test-server-locked-article-is-not-overwritten ()
+  (let* ((remote (sspai--normalize-article (sspai-test--article-object 2)))
+         (state (list :status 'tracked :meta (sspai-test--metadata "Local")
+                      :raw-body "Local body\n" :remote remote)))
+    (cl-letf (((symbol-function 'sspai--prepare-write-assets)
+               (lambda (&rest _) (ert-fail "uploaded assets for locked article"))))
+      (should-error (sspai--write-state "/tmp/offline-sspai-test.md" state 'community)
+                    :type 'user-error))))
+
+(ert-deftest sspai-test-new-publish-checkpoints-id-before-follow-up-update ()
+  (let* ((created
+          (sspai--normalize-article
+           (sspai-test--article-object 4)))
+         (published
+          (sspai--normalize-article
+           (let ((object (sspai-test--article-object 5)))
+             (setf (alist-get 'title object) "Local"
+                   (alist-get 'title_last object) "Local"
+                   (alist-get 'body object) "<p>Body</p>"
+                   (alist-get 'body_last object) "<p>Body</p>")
+             object)))
+         (meta
+          (sspai-test--plist-with
+           (sspai-test--metadata "Local")
+           :status "published"))
+         (state
+          (list
+           :status 'new
+           :meta meta
+           :raw-body "Body\n"
+           :remote nil))
+         calls)
+    (cl-letf
+        (((symbol-function 'sspai--prepare-write-assets)
+          (lambda (&rest _arguments)
+            (push 'assets calls)
+            (list "<p>Body</p>" nil)))
+         ((symbol-function 'sspai--article-add)
+          (lambda (payload)
+            (push (list 'add
+                        (sspai--object-get payload 'type))
+                  calls)
+            created))
+         ((symbol-function 'sspai--checkpoint-created-interim)
+          (lambda (_file _expected intended _body _remote _action)
+            (push 'interim-checkpoint calls)
+            (sspai-test--plist-with intended :id 42)))
+         ((symbol-function 'sspai--auto-save-confirmed)
+          (lambda (remote _title _html)
+            (push 'autosave calls)
+            remote))
+         ((symbol-function 'sspai--full-update-confirmed)
+          (lambda (_remote payload action)
+            (push
+             (list
+              'update action
+              (sspai--object-get payload 'type))
+             calls)
+            published))
+         ((symbol-function 'sspai--checkpoint-pushed)
+          (lambda (&rest _arguments)
+            (push 'final-checkpoint calls)))
+         ((symbol-function 'sspai--confirm)
+          (lambda (&rest _arguments) nil)))
+      (sspai--write-state
+       "/tmp/offline-sspai-test.md"
+       state 'community)
+      (should
+       (equal
+        (nreverse calls)
+        '(assets
+          (add 4)
+          interim-checkpoint
+          autosave
+          (update community 5)
+          final-checkpoint))))))
+
+(ert-deftest sspai-test-community-publication-can-be-routed-to-audit ()
+  (let ((payload (sspai-test--article-object 5)))
+    (dolist (type '(1 2 5))
+      (let* ((object (copy-tree payload))
+             (_ (setf (alist-get 'type object) type))
+             (remote (sspai--normalize-article object)))
+        (cl-letf (((symbol-function 'sspai--article-update) (lambda (_) nil))
+                  ((symbol-function 'sspai--article-get) (lambda (_) remote)))
+          (should (eq (sspai--full-update-confirmed remote payload 'community)
+                      remote)))
+        (when (memq type '(1 2))
+          (should (string-match-p "尚未公开"
+                                  (sspai--write-result-label 'community remote)))
+          (should-not (sspai--update-matches-p remote payload 'draft)))))))
+
+(ert-deftest sspai-test-audit-transition-still-rejects-content-differences ()
+  (let ((payload (sspai-test--article-object 5)))
+    (dolist (field '(title title_last body body_last))
+      (let ((object (copy-tree payload)))
+        (setf (alist-get 'type object) 2
+              (alist-get field object) "Changed remotely")
+        (let ((remote (sspai--normalize-article object)))
+          (cl-letf (((symbol-function 'sspai--article-update) (lambda (_) nil))
+                    ((symbol-function 'sspai--article-get) (lambda (_) remote)))
+            (should-error (sspai--full-update-confirmed remote payload 'community)
+                          :type 'sspai-published-but-not-checkpointed)))))
+    (let ((object (copy-tree payload)))
+      (setf (alist-get 'type object) 4)
+      (should-not (sspai--update-matches-p
+                   (sspai--normalize-article object) payload 'community)))))
+
+(ert-deftest sspai-test-public-write-commands-select-correct-action ()
+  (let (actions)
+    (cl-letf (((symbol-function 'sspai--current-source-file)
+               (lambda () "/tmp/offline-sspai-test.md"))
+              ((symbol-function 'sspai--state) (lambda (_) '(:status tracked)))
+              ((symbol-function 'sspai--write-state)
+               (lambda (_file _state action) (push action actions))))
+      (sspai-save-draft)
+      (sspai-publish-community)
+      (sspai-submit-for-review)
+      (should (equal (nreverse actions) '(draft community audit))))))
+
+(ert-deftest sspai-test-sync-only-pushes-local-source ()
+  (let (calls)
+    (cl-letf (((symbol-function 'sspai--current-source-file)
+               (lambda () "/tmp/offline-sspai-test.md"))
+              ((symbol-function 'sspai--state)
+               (lambda (_) (list :status 'tracked :meta (sspai-test--metadata "Local"))))
+              ((symbol-function 'sspai--write-state)
+               (lambda (_file _state action) (push action calls))))
+      (sspai-sync)
+      (should (equal calls '(draft))))))
+
+(ert-deftest sspai-test-open-links-are-derived-from-article-id ()
+  (let (opened)
+    (cl-letf (((symbol-function 'sspai--current-source-file)
+               (lambda () "/tmp/offline-sspai-test.org"))
+              ((symbol-function 'sspai--read-source)
+               (lambda (_)
+                 (list (sspai--meta-from-object '((id . 42)) "Local" nil nil)
+                       "Body\n")))
+              ((symbol-function 'browse-url)
+               (lambda (url &rest _) (push url opened))))
+      (sspai-open-remote)
+      (sspai-open-preview)
+      (should (equal (nreverse opened)
+                     '("https://sspai.com/post/42"
+                       "https://sspai.com/write/42"))))))
+
+(provide 'sspai-test)
+
+;;; sspai-test.el ends here
