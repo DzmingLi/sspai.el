@@ -13,5 +13,9 @@
   payload inspection, article import, or browser-opening commands.
 - Keep source metadata minimal. Do not persist values that can be derived from
   the article ID or package configuration.
+- Authenticate directly through `firefox-cookies.el`. Keep service endpoints
+  fixed; do not add alternate credential providers or configurable API hosts.
+- Checkpoint only article identity/status and image caches. Preserve editorial
+  text and formatting, and do not insert omitted optional settings.
 - Run `make check` before publishing changes. Tests must stay offline and must
   not read real Firefox cookies or publish real articles.

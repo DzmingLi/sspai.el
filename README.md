@@ -73,7 +73,8 @@ Emacs 需要支持 SQLite（`M-: (sqlite-available-p)` 返回非 `nil`）。
 
 发布成功后，客户端维护 `SSPAI_ID`、`SSPAI_STATUS` 和图片上传缓存。
 `SSPAI_STATUS` 记录实际发布结果，不决定下一次发布方式；每次操作由所选
-命令决定。客户端写回这些信息时保留本地标题、正文、标签和其他 Org 关键字。
+命令决定。客户端只更新这些字段，保留本地标题、正文、标签及原有排版。
+省略的可选设置不会在发布时自动补入文件。
 
 已有官方标签会保留其服务端 ID；新标签名称作为自定义标签提交。
 
@@ -98,13 +99,6 @@ Bearer token。不会扫描或猜测 Firefox profile；容器可通过
 
 账户 token、单篇文章编辑 token 和七牛上传凭据只在内存中使用，不写入
 Org 文件。账户 Bearer 只发送到少数派 API，图片上传使用独立的七牛凭据。
-
-也可以设置当前会话的 `sspai-access-token`。若希望使用 `auth-source`，
-设置 `(setq sspai-cookie-function nil)`，并添加：
-
-```text
-machine sspai.com login sspai.el port https password YOUR_BEARER_TOKEN
-```
 
 ## 测试
 

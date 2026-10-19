@@ -43,7 +43,6 @@
 
 ;;; Code:
 
-(require 'auth-source)
 (require 'cl-lib)
 (require 'dom)
 (require 'firefox-cookies)
@@ -80,43 +79,6 @@
 
 ;;;; Customization
 
-(defcustom sspai-api-base-url "https://sspai.com/api/v1"
-  "Base URL of the authorized SSPAI editor API.
-It must be an HTTPS URL without a query or fragment."
-  :type 'string
-  :group 'sspai)
-
-(defcustom sspai-upload-url "https://upload.qiniup.com/"
-  "Qiniu upload URL returned by the current SSPAI editor contract.
-The SSPAI Bearer token is never sent to this URL."
-  :type 'string
-  :group 'sspai)
-
-(defcustom sspai-cdn-base-url "https://cdnfile.sspai.com"
-  "Base URL used to turn an SSPAI attachment key into a public URL."
-  :type 'string
-  :group 'sspai)
-
-(defcustom sspai-access-token nil
-  "Authorized SSPAI editor Bearer token for the current Emacs session.
-When nil, use `sspai-cookie-function' to read the Firefox login token.
-When both are nil, look in `auth-source' for an entry whose host matches
-`sspai-api-base-url', user is \"sspai.el\", and port is \"https\"."
-  :type '(choice (const :tag "Use Firefox cookies or auth-source" nil)
-                 (string :tag "Bearer token"))
-  :group 'sspai)
-
-(defcustom sspai-cookie-function #'firefox-cookies-get
-  "Function called with an API URL to read its applicable cookies.
-Return an alist of (NAME . VALUE) strings, as `firefox-cookies-get' does.
-The sspai_jwt_token cookie supplies the API Bearer token; other cookies are
-not sent.  Configure `firefox-cookies-profile-directory' explicitly and log
-in to SSPAI in that Firefox profile.  Cookies are read afresh for each request.
-Set this to nil to use `auth-source' instead.  A non-nil `sspai-access-token'
-takes precedence over this function."
-  :type '(choice (const :tag "Use auth-source" nil) function)
-  :group 'sspai)
-
 (defcustom sspai-request-timeout 30
   "Timeout in seconds for one SSPAI or Qiniu HTTP request."
   :type 'integer
@@ -145,12 +107,6 @@ keeping body images within 2 MB."
   :type 'integer
   :group 'sspai)
 
-(defcustom sspai-banner-standard-size '(1420 . 708)
-  "Official SSPAI banner size as (WIDTH . HEIGHT), in pixels.
-The central HEIGHT by HEIGHT square is the documented safe area."
-  :type '(cons integer integer)
-  :group 'sspai)
-
 (defcustom sspai-shift-heading-level t
   "When non-nil, shift source headings down one level for the article body.
 The article title occupies the page's h1, so source h1 headings become h2."
@@ -175,80 +131,18 @@ The article title occupies the page's h1, so source h1 headings become h2."
 
 (defconst sspai--hash-regexp "\\`[[:xdigit:]]\\{64\\}\\'")
 
-(defconst sspai--org-owned-keywords
-  '("SSPAI_ID"
-    "SSPAI_STATUS"
-    "SSPAI_ALLOW_COMMENT"
-    "SSPAI_BENEFITS_STATEMENT_ON"
-    "SSPAI_BENEFITS_STATEMENT_ID"
-    "SSPAI_BANNER_ID"
-    "SSPAI_BANNER_KEY"
-    "SSPAI_BANNER_HASH"
-    "SSPAI_IMAGE_CACHE"))
-
-(defconst sspai--missing (make-symbol "sspai--missing"))
-
 (cl-defstruct (sspai--response
                (:constructor sspai--make-response))
   status
-  headers
-  body
-  url)
+  body)
 
 ;;;; Generic value helpers
 
-(defun sspai--object-get (object key)
-  "Return KEY from JSON OBJECT represented as an alist or hash table."
-  (cond
-   ((hash-table-p object)
-    (let ((value (gethash key object sspai--missing)))
-      (if (eq value sspai--missing)
-          (gethash (symbol-name key) object)
-        value)))
-   ((listp object)
-    (let ((cell (or (assq key object)
-                    (assoc (symbol-name key) object))))
-      (cdr cell)))
-   (t nil)))
-
-(defun sspai--object-member-p (object key)
-  "Return non-nil when OBJECT explicitly contains KEY."
-  (cond
-   ((hash-table-p object)
-    (or (not (eq (gethash key object sspai--missing) sspai--missing))
-        (not (eq (gethash (symbol-name key) object sspai--missing)
-                 sspai--missing))))
-   ((listp object)
-    (or (assq key object) (assoc (symbol-name key) object)))
-   (t nil)))
-
-(defun sspai--object-set (object key value)
-  "Set KEY to VALUE in alist OBJECT and return OBJECT."
-  (setf (alist-get key object) value)
-  object)
-
-(defun sspai--value-string (value)
-  "Return scalar VALUE as a string, or nil for compound values."
-  (cond
-   ((null value) nil)
-   ((stringp value) value)
-   ((symbolp value) (symbol-name value))
-   ((numberp value) (number-to-string value))
-   (t nil)))
-
 (defun sspai--required-string (field value)
-  "Normalize VALUE as a required non-empty string for FIELD."
-  (let ((text (and (sspai--value-string value)
-                   (string-trim (sspai--value-string value)))))
-    (unless (and text (not (string-empty-p text)))
-      (user-error "sspai: %s 必须是非空字符串" field))
-    text))
-
-(defun sspai--optional-string (field value)
-  "Normalize VALUE as an optional non-empty string for FIELD."
-  (if (null value)
-      nil
-    (sspai--required-string field value)))
+  "Require a non-empty string VALUE for FIELD."
+  (unless (and (stringp value) (not (string-empty-p (string-trim value))))
+    (user-error "sspai: %s 必须是非空字符串" field))
+  (string-trim value))
 
 (defun sspai--integer (field value &optional allow-zero)
   "Normalize VALUE as an integer for FIELD.
@@ -270,13 +164,9 @@ When ALLOW-ZERO is nil, require a positive integer."
   "Normalize VALUE as a boolean for FIELD, using DEFAULT when absent."
   (cond
    ((null value) default)
-   ((or (eq value t)
-        (and (stringp value)
-             (member (downcase value) '("true" "yes" "on" "1"))))
+   ((or (eq value t) (equal value "true"))
     t)
-   ((or (eq value :json-false)
-        (and (stringp value)
-             (member (downcase value) '("false" "no" "off" "0"))))
+   ((or (eq value :json-false) (equal value "false"))
     nil)
    (t (user-error "sspai: %s 必须是 true 或 false" field))))
 
@@ -284,141 +174,22 @@ When ALLOW-ZERO is nil, require a positive integer."
   "Return VALUE in the representation expected by `json-serialize'."
   (if value t :json-false))
 
-(defun sspai--trim-body (body)
-  "Normalize BODY line endings and its final newline.
-Leading whitespace, including indentation on the first line, is preserved."
-  (let ((text (replace-regexp-in-string
-               "\r\n?\\|\n" "\n" (or body "") t t)))
-    (concat (replace-regexp-in-string "\n+\\'" "" text) "\n")))
-
-(defun sspai--hash-json (object)
-  "Return a stable SHA-256 hash of fixed-order alist OBJECT."
-  (secure-hash
-   'sha256
-   (encode-coding-string
-    (json-serialize object :null-object nil :false-object :json-false)
-    'utf-8 t)))
-
 ;;;; URL and authentication
 
-(defun sspai--normalize-base-url (&optional value)
-  "Validate and normalize API base URL VALUE."
-  (let* ((raw (string-trim (or value sspai-api-base-url "")))
-         (parsed (url-generic-parse-url raw))
-         (scheme (downcase (or (url-type parsed) "")))
-         (host (url-host parsed))
-         (port (url-port parsed))
-         (file (or (url-filename parsed) "")))
-    (unless (and (string-equal scheme "https")
-                 (stringp host)
-                 (not (string-empty-p host))
-                 (not (url-user parsed))
-                 (not (string-match-p "[?#]" raw))
-                 (or (null port)
-                     (and (integerp port) (< 0 port 65536)))
-                 (or (string-empty-p file)
-                     (string-prefix-p "/" file)))
-      (user-error "sspai: API base 必须是 HTTPS URL：%s" raw))
-    (replace-regexp-in-string "/+\\'" "" raw)))
-
-(defun sspai--normalize-origin (field value)
-  "Validate FIELD VALUE as an HTTPS origin and return it without trailing slash."
-  (let* ((raw (string-trim (or value "")))
-         (parsed (url-generic-parse-url raw))
-         (scheme (downcase (or (url-type parsed) "")))
-         (host (url-host parsed))
-         (port (url-port parsed))
-         (file (or (url-filename parsed) "")))
-    (unless (and (string-equal scheme "https")
-                 host
-                 (not (url-user parsed))
-                 (or (null port)
-                     (and (integerp port) (< 0 port 65536)))
-                 (member file '("" "/"))
-                 (not (string-match-p "[?#]" raw)))
-      (user-error "sspai: %s 必须是 HTTPS origin：%s" field raw))
-    (replace-regexp-in-string "/+\\'" "" raw)))
-
-(defun sspai--api-host ()
-  "Return the configured SSPAI API host."
-  (url-host (url-generic-parse-url (sspai--normalize-base-url))))
-
 (defun sspai--api-url (path)
-  "Return absolute configured API URL for relative PATH."
-  (unless (and (stringp path) (string-prefix-p "/" path))
-    (error "sspai: API path 必须以 / 开头：%S" path))
-  (concat (sspai--normalize-base-url) path))
+  "Return the SSPAI editor API URL for PATH."
+  (concat "https://sspai.com/api/v1" path))
 
-(defun sspai--secret-value (secret)
-  "Return SECRET, calling it when auth-source supplied a thunk."
-  (if (functionp secret) (funcall secret) secret))
-
-(defun sspai--access-token (&optional url)
-  "Return the authorized SSPAI editor Bearer token for API URL.
-Read browser credentials on each call, without caching or persisting them."
-  (let ((direct (and (stringp sspai-access-token)
-                     (string-trim sspai-access-token))))
-    (cond
-     ((and direct (not (string-empty-p direct))) direct)
-     (sspai-cookie-function
-      (let* ((cookies (funcall sspai-cookie-function
-                               (or url (sspai--api-url "/"))))
-             (value (cdr (assoc "sspai_jwt_token" cookies))))
-        (unless (and (stringp value)
-                     (not (string-empty-p (string-trim value))))
-          (user-error
-           (concat "sspai: Firefox 中没有有效的少数派登录 Cookie；"
-                   "请在配置的 Firefox profile 中登录 sspai.com")))
-        (let ((token (url-unhex-string value t)))
-          (when (or (string-empty-p (string-trim token))
-                    (string-match-p "[\r\n]" token))
-            (user-error "sspai: Firefox 登录 token 格式无效，请重新登录"))
-          (string-trim token))))
-     (t
-      (let* ((entry
-              (car
-               (auth-source-search
-                :host (sspai--api-host)
-                :user "sspai.el"
-                :port "https"
-                :require '(:secret)
-                :max 1)))
-             (secret (and entry
-                          (sspai--secret-value
-                           (plist-get entry :secret)))))
-        (unless (and (stringp secret)
-                     (not (string-empty-p (string-trim secret))))
-          (user-error
-           (concat
-            "sspai: 未找到 Bearer token；请设置 sspai-access-token，"
-            "或在 auth-source 中保存 machine %s login sspai.el password TOKEN")
-           (sspai--api-host)))
-        (string-trim secret))))))
+(defun sspai--access-token (url)
+  "Read the Firefox login token for API URL without caching it."
+  (let* ((value (cdr (assoc "sspai_jwt_token" (firefox-cookies-get url))))
+         (token (and (stringp value) (url-unhex-string value t))))
+    (unless (and token (not (string-empty-p (string-trim token)))
+                 (not (string-match-p "[\r\n]" token)))
+      (user-error "sspai: Firefox 登录 Cookie 无效或缺失，请在配置的 profile 中登录少数派"))
+    (string-trim token)))
 
 ;;;; HTTP and API envelopes
-
-(defun sspai--header-value (headers name)
-  "Return NAME from response HEADERS, ignoring case."
-  (cdr (assoc-string name headers t)))
-
-(defun sspai--parse-response-headers ()
-  "Parse HTTP response headers in the current URL buffer."
-  (save-excursion
-    (goto-char (point-min))
-    (let ((end (or (and (boundp 'url-http-end-of-headers)
-                        url-http-end-of-headers)
-                   (progn
-                     (re-search-forward "\r?\n\r?\n" nil t)
-                     (point))))
-          headers)
-      (forward-line 1)
-      (while (and end (< (point) end)
-                  (re-search-forward
-                   "^\\([^:\r\n]+\\):[ \t]*\\([^\r\n]*\\)" end t))
-        (push (cons (downcase (match-string 1))
-                    (string-trim (match-string 2)))
-              headers))
-      (nreverse headers))))
 
 (defun sspai--buffer-response-body ()
   "Return decoded UTF-8 response body from the current URL buffer."
@@ -439,13 +210,13 @@ Read browser credentials on each call, without caching or persisting them."
     (method url &key data content-type headers auth redact)
   "Send one HTTP request to URL and return an `sspai--response'.
 DATA may be UTF-8 or an unibyte multipart payload.  AUTH adds the SSPAI
-Bearer token and is only accepted for configured API URLs.  Cookies and
+Bearer token and is only accepted for SSPAI API URLs.  Cookies and
 automatic redirects are disabled.  REDACT is a list of additional transient
 secrets that must not appear in a transport error."
   (when auth
     (unless (string-prefix-p
-             (concat (sspai--normalize-base-url) "/") url)
-      (error "sspai: 拒绝向 API base 之外发送 Bearer token：%s" url)))
+             "https://sspai.com/api/v1/" url)
+      (error "sspai: 拒绝向少数派 API 之外发送 Bearer token：%s" url)))
   (let* ((account-token (and auth (sspai--access-token url)))
          (url-request-method method)
          (url-request-data data)
@@ -502,9 +273,7 @@ secrets that must not appear in a transport error."
            :status (or (and (boundp 'url-http-response-status)
                             url-http-response-status)
                        0)
-           :headers (sspai--parse-response-headers)
-           :body (sspai--buffer-response-body)
-           :url url))
+           :body (sspai--buffer-response-body)))
       (kill-buffer buffer))))
 
 (defun sspai--parse-json (text)
@@ -531,9 +300,9 @@ secrets that must not appear in a transport error."
 (defun sspai--json-error-message (json body)
   "Extract a useful error message from JSON or raw BODY."
   (or (and json
-           (or (sspai--object-get json 'msg)
-               (sspai--object-get json 'message)
-               (let ((value (sspai--object-get json 'error)))
+           (or (alist-get 'msg json)
+               (alist-get 'message json)
+               (let ((value (alist-get 'error json)))
                  (and (stringp value) value))))
       (and (stringp body)
            (not (string-empty-p (string-trim body)))
@@ -573,7 +342,7 @@ secrets that must not appear in a transport error."
                               "application/json; charset=utf-8")
            :redact
            (let ((token (and payload
-                             (sspai--object-get payload 'token))))
+                             (alist-get 'token payload))))
              (and (stringp token) (list token)))
            :auth t))
          (status (sspai--response-status response))
@@ -597,7 +366,7 @@ secrets that must not appear in a transport error."
       (signal 'sspai-api-error
               (list "成功响应没有 JSON body"
                     status path 'invalid-success)))
-    (let ((error-code (sspai--object-get json 'error)))
+    (let ((error-code (alist-get 'error json)))
       (unless (and (integerp error-code)
                    (zerop error-code))
         (signal
@@ -611,10 +380,8 @@ secrets that must not appear in a transport error."
 
 (defun sspai--api-data (method path &optional query payload)
   "Return the `data' member from an SSPAI API envelope."
-  (sspai--object-get
-   (sspai--api-request
-    method path :query query :payload payload)
-   'data))
+  (alist-get 'data (sspai--api-request
+                    method path :query query :payload payload)))
 
 ;;;; Source metadata
 
@@ -630,152 +397,21 @@ secrets that must not appear in a transport error."
     (insert-file-contents file)
     (buffer-substring-no-properties (point-min) (point-max))))
 
-(defun sspai--normalize-status (value &optional default)
-  "Normalize status VALUE, using DEFAULT when VALUE is absent."
-  (let ((text (downcase
-               (or (sspai--value-string value)
-                   default
-                   "draft"))))
-    (pcase text
-      ("draft" "draft")
-      ((or "published" "community") "published")
-      ((or "audit" "review") "audit")
-      ("featured" "featured")
-      (_ (user-error
-          "sspai: status 必须是 draft、published 或 audit：%s"
-          text)))))
-
 (defun sspai--type-status (type)
   "Return local status string for Matrix editor TYPE."
   (or (cdr (assq type sspai--type-to-status))
       (format "type-%s" type)))
 
-(defun sspai--normalize-tags (value)
-  "Normalize Org or API tag VALUE into a duplicate-free string list."
-  (let ((items
-         (cond
-          ((null value) nil)
-          ((stringp value)
-           (let ((trimmed (string-trim value)))
-             (cond
-              ((string-empty-p trimmed) nil)
-              ((and (string-prefix-p ":" trimmed)
-                    (string-suffix-p ":" trimmed))
-               (split-string trimmed ":" t "[ \t\n]+"))
-              (t
-               (split-string trimmed "[,，]" t "[ \t\n]+")))))
-          ((vectorp value) (append value nil))
-          ((listp value) value)
-          (t (user-error "sspai: tags 必须是字符串或列表"))))
-        normalized)
-    (dolist (item items)
-      (let ((text (sspai--required-string "tag" item)))
-        (unless (member text normalized)
-          (push text normalized))))
-    (nreverse normalized)))
-
-(defun sspai--normalize-image-cache (value)
-  "Normalize image cache VALUE to an equal hash table."
-  (let ((table (make-hash-table :test #'equal)))
-    (cond
-     ((null value))
-     ((hash-table-p value)
-      (maphash
-       (lambda (key url)
-         (let ((key (downcase
-                     (sspai--required-string "image-cache key" key)))
-               (url (sspai--required-string "image-cache URL" url)))
-           (unless (string-match-p sspai--hash-regexp key)
-             (user-error "sspai: 无效 image-cache key：%s" key))
-           (unless (string-match-p "\\`https://" url)
-             (user-error "sspai: image-cache URL 必须使用 HTTPS：%s" url))
-           (puthash key url table)))
-       value))
-     ((listp value)
-      (dolist (entry value)
-        (let ((key
-               (downcase
-                (sspai--required-string "image-cache key" (car entry))))
-              (url
-               (sspai--required-string "image-cache URL" (cdr entry))))
-          (unless (string-match-p sspai--hash-regexp key)
-            (user-error "sspai: 无效 image-cache key：%s" key))
-          (unless (string-match-p "\\`https://" url)
-            (user-error "sspai: image-cache URL 必须使用 HTTPS：%s" url))
-          (puthash key url table))))
-     (t (user-error "sspai: image-cache 必须是 mapping/object")))
-    table))
-
-(defun sspai--meta-from-object (object title banner tags)
-  "Normalize SSPAI metadata OBJECT and generic TITLE, BANNER, TAGS."
-  (unless (or (null object) (listp object) (hash-table-p object))
-    (user-error "sspai: sspai metadata 必须是 mapping/object"))
-  (let* ((id (sspai--integer "id" (sspai--object-get object 'id)))
-         (status (when-let* ((value (sspai--object-get object 'status)))
-                   (sspai--normalize-status value)))
-         (allow-comment
-          (sspai--boolean
-           "allow-comment"
-           (sspai--object-get object 'allow-comment)
-           t))
-         (benefits-on
-          (sspai--boolean
-           "benefits-statement-on"
-           (sspai--object-get object 'benefits-statement-on)
-           nil))
-         (benefits-id
-          (or (sspai--integer
-               "benefits-statement-id"
-               (sspai--object-get object 'benefits-statement-id)
-               t)
-              0))
-         (banner-id
-          (or (sspai--integer
-               "banner-id"
-               (sspai--object-get object 'banner-id)
-               t)
-              0))
-         (banner-key
-          (sspai--optional-string
-           "banner-key" (sspai--object-get object 'banner-key)))
-         (banner-hash
-          (sspai--optional-string
-           "banner-hash" (sspai--object-get object 'banner-hash)))
-         (image-cache
-          (sspai--normalize-image-cache
-           (sspai--object-get object 'image-cache)))
-         ;; An empty title is useful in a newly-created local template.  It is
-         ;; rejected only when a remote write is prepared.
-         (title
-          (cond
-           ((null title) nil)
-           ((sspai--value-string title)
-            (string-trim (sspai--value-string title)))
-           (t (user-error "sspai: title 必须是字符串"))))
-         (banner (sspai--optional-string "banner" banner))
-         (tags (sspai--normalize-tags tags)))
-    (dolist (hash (delq nil (list banner-hash)))
-      (unless (string-match-p sspai--hash-regexp hash)
-        (user-error "sspai: hash 格式无效：%s" hash)))
-    (when (and banner-key (zerop banner-id))
-      ;; A body attachment URL has no usable banner attachment id.
-      (user-error "sspai: banner-key 存在时必须同时保存 banner-id"))
-    (when (and benefits-on (zerop benefits-id))
-      (user-error
-       "sspai: 开启利益相关声明时必须设置 benefits-statement-id"))
-    (list
-     :id id
-     :status status
-     :title title
-     :banner banner
-     :tags tags
-     :allow-comment allow-comment
-     :benefits-statement-on benefits-on
-     :benefits-statement-id benefits-id
-     :banner-id banner-id
-     :banner-key banner-key
-     :banner-hash banner-hash
-     :image-cache image-cache)))
+(defun sspai--normalize-image-cache (table)
+  "Validate the string-keyed image cache TABLE."
+  (setq table (or table (make-hash-table :test #'equal)))
+  (maphash
+   (lambda (key url)
+     (unless (and (stringp key) (string-match-p sspai--hash-regexp key)
+                  (stringp url) (string-prefix-p "https://" url))
+       (user-error "sspai: 无效的图片缓存条目：%S" key)))
+   table)
+  table)
 
 (defun sspai--org-header-and-body (text)
   "Split Org TEXT into (HEADER-LINES BODY)."
@@ -837,144 +473,82 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
        (user-error "sspai: #+SSPAI_IMAGE_CACHE 不是有效 JSON：%s"
                    (error-message-string err))))))
 
-(defun sspai--org-meta-and-body (file)
-  "Return normalized metadata and raw body for Org FILE."
-  (pcase-let* ((`(,header ,body)
-                 (sspai--org-header-and-body
-                  (sspai--read-file-text file)))
-                (values (sspai--org-header-values header))
-                (object
-                 `((id . ,(sspai--org-value "SSPAI_ID" values))
-                   (status . ,(sspai--org-value "SSPAI_STATUS" values))
-                   (allow-comment
-                    . ,(sspai--org-value
-                        "SSPAI_ALLOW_COMMENT" values))
-                   (benefits-statement-on
-                    . ,(sspai--org-value
-                        "SSPAI_BENEFITS_STATEMENT_ON" values))
-                   (benefits-statement-id
-                    . ,(sspai--org-value
-                        "SSPAI_BENEFITS_STATEMENT_ID" values))
-                   (banner-id
-                    . ,(sspai--org-value "SSPAI_BANNER_ID" values))
-                   (banner-key
-                    . ,(sspai--org-value "SSPAI_BANNER_KEY" values))
-                   (banner-hash
-                    . ,(sspai--org-value "SSPAI_BANNER_HASH" values))
-                   (image-cache
-                    . ,(sspai--org-image-cache
-                        (sspai--org-value
-                         "SSPAI_IMAGE_CACHE" values t))))))
-    (list
-     (sspai--meta-from-object
-      object
-      (sspai--org-value "TITLE" values)
-      (sspai--org-value "BANNER" values)
-      (sspai--org-value "FILETAGS" values t))
-     body)))
+(defun sspai--org-meta-and-body (text)
+  "Read article settings and body directly from Org TEXT."
+  (pcase-let* ((`(,header ,body) (sspai--org-header-and-body text))
+               (values (sspai--org-header-values header)))
+    (cl-flet ((value (key) (sspai--org-value key values)))
+      (let* ((banner-id (or (sspai--integer "banner-id"
+                                            (value "SSPAI_BANNER_ID") t) 0))
+             (banner-key (value "SSPAI_BANNER_KEY"))
+             (banner-hash (value "SSPAI_BANNER_HASH"))
+             (benefits-on (sspai--boolean "benefits-statement-on"
+                                          (value "SSPAI_BENEFITS_STATEMENT_ON")))
+             (benefits-id (or (sspai--integer "benefits-statement-id"
+                                              (value "SSPAI_BENEFITS_STATEMENT_ID") t)
+                              0)))
+        (when (and banner-hash (not (string-match-p sspai--hash-regexp banner-hash)))
+          (user-error "sspai: 无效的题图缓存 hash"))
+        (when (and banner-key (zerop banner-id))
+          (user-error "sspai: banner-key 存在时必须同时保存 banner-id"))
+        (when (and benefits-on (zerop benefits-id))
+          (user-error "sspai: 开启利益相关声明时必须设置 statement id"))
+        (list
+         (list :id (sspai--integer "id" (value "SSPAI_ID"))
+               :status (value "SSPAI_STATUS")
+               :title (sspai--org-value "TITLE" values t)
+               :banner (value "BANNER")
+               :tags (delete-dups
+                      (split-string (or (sspai--org-value "FILETAGS" values t) "")
+                                    ":" t "[ \t]+"))
+               :allow-comment (sspai--boolean "allow-comment"
+                                              (value "SSPAI_ALLOW_COMMENT") t)
+               :benefits-statement-on benefits-on
+               :benefits-statement-id benefits-id
+               :banner-id banner-id :banner-key banner-key :banner-hash banner-hash
+               :image-cache (sspai--org-image-cache
+                             (sspai--org-value "SSPAI_IMAGE_CACHE" values t))
+               :source-text text)
+         body)))))
 
 (defun sspai--read-source (file)
   "Return (META RAW-BODY) from Org FILE."
   (sspai--validate-source-file file)
-  (sspai--org-meta-and-body file))
+  (sspai--org-meta-and-body (sspai--read-file-text file)))
 
 ;;;; Source formatting and safe checkpoints
 
-(defun sspai--image-cache-alist (table)
-  "Return image cache TABLE as a stable, sorted alist."
-  (let (entries)
-    (maphash (lambda (key value) (push (cons key value) entries)) table)
-    (sort entries (lambda (left right)
-                    (string< (car left) (car right))))))
-
-(defun sspai--json-string-object (entries)
-  "Serialize string-to-string ENTRIES as a stable JSON object."
-  (concat
-   "{"
-   (mapconcat
-    (lambda (entry)
-      (concat (json-serialize (car entry))
-              ":"
-              (json-serialize (cdr entry))))
-    entries
-    ",")
-   "}"))
-
-(defun sspai--format-org-meta (meta)
-  "Format META as owned Org keywords."
-  (let (lines)
-    (cl-labels
-        ((put-string
-          (key value)
-          (when value
-            (push (format "#+SSPAI_%s: %s" key value) lines)))
-         (put-number
-          (key value &optional omit-zero)
-          (when (and (integerp value)
-                     (or (not omit-zero) (not (zerop value))))
-            (push (format "#+SSPAI_%s: %s" key value) lines)))
-         (put-bool
-          (key value)
-          (push (format "#+SSPAI_%s: %s"
-                        key (if value "true" "false"))
-                lines)))
-      (put-number "ID" (plist-get meta :id))
-      (put-string "STATUS" (plist-get meta :status))
-      (unless (plist-get meta :allow-comment)
-        (put-bool "ALLOW_COMMENT" nil))
-      (put-bool "BENEFITS_STATEMENT_ON"
-                (plist-get meta :benefits-statement-on))
-      (put-number "BENEFITS_STATEMENT_ID"
-                  (plist-get meta :benefits-statement-id) t)
-      (put-number "BANNER_ID" (plist-get meta :banner-id) t)
-      (put-string "BANNER_KEY" (plist-get meta :banner-key))
-      (put-string "BANNER_HASH" (plist-get meta :banner-hash))
-      (when (> (hash-table-count (plist-get meta :image-cache)) 0)
-        (put-string
-         "IMAGE_CACHE"
-         (sspai--json-string-object
-          (sspai--image-cache-alist
-           (plist-get meta :image-cache))))))
-    (concat (mapconcat #'identity (nreverse lines) "\n") "\n")))
-
-(defun sspai--format-org-source (old-text meta body)
-  "Return Org source based on OLD-TEXT, META, and BODY."
-  (pcase-let* ((`(,header ,_old-body)
-                 (sspai--org-header-and-body old-text))
-                (kept
-                 (cl-remove-if
-                  (lambda (line)
-                    (and
-                     (string-match
-                      "\\`[ \t]*#\\+\\([^: \t\n]+\\):" line)
-                     (let ((key (upcase (match-string 1 line))))
-                       (or (member key '("TITLE" "BANNER" "FILETAGS"))
-                           ;; Rewrite the entire platform namespace.  This is
-                           ;; deliberately broader than the known field list:
-                           ;; stale/unknown token-like SSPAI fields must never
-                           ;; survive a checkpoint.
-                           (string-prefix-p "SSPAI_" key)
-                           (member key sspai--org-owned-keywords)))))
-                  header))
-                (kept-text
-                 (string-trim
-                  (mapconcat #'identity kept "\n"))))
-    (concat
-     "#+TITLE: " (or (plist-get meta :title) "") "\n"
-     (when (plist-get meta :banner)
-       (concat "#+BANNER: " (plist-get meta :banner) "\n"))
-     "#+FILETAGS: "
-     (if (plist-get meta :tags)
-         (concat ":"
-                 (mapconcat #'identity (plist-get meta :tags) ":")
-                 ":")
-       "")
-     "\n"
-     (sspai--format-org-meta meta)
-     (unless (string-empty-p kept-text)
-       (concat kept-text "\n"))
-     "\n"
-     (sspai--trim-body body))))
+(defun sspai--format-org-source (text meta)
+  "Update publication fields in TEXT from META, preserving all other text."
+  (pcase-let* ((`(,header ,body) (sspai--org-header-and-body text))
+               (cache (plist-get meta :image-cache))
+               (fields
+                `(("SSPAI_ID" . ,(plist-get meta :id))
+                  ("SSPAI_STATUS" . ,(plist-get meta :status))
+                  ("SSPAI_BANNER_ID" . ,(plist-get meta :banner-id))
+                  ("SSPAI_BANNER_KEY" . ,(plist-get meta :banner-key))
+                  ("SSPAI_BANNER_HASH" . ,(plist-get meta :banner-hash))
+                  ("SSPAI_IMAGE_CACHE" . ,(when (> (hash-table-count cache) 0)
+                                            (json-serialize cache))))))
+    (dolist (field fields)
+      (let* ((key (car field))
+             (value (cdr field))
+             (line (and value (not (equal value 0))
+                        (format "#+%s: %s" key value)))
+             (regexp (concat "\\`[ \t]*#\\+" key ":[^\n]*\\'"))
+             (case-fold-search t)
+             found)
+        (setq header
+              (delq nil
+                    (mapcar (lambda (old)
+                              (if (string-match-p regexp old)
+                                  (prog1 line (setq found t))
+                                old))
+                            header)))
+        (when (and line (not found))
+          (push line header))))
+    (concat (mapconcat #'identity header "\n")
+            (unless (string-empty-p body) "\n") body)))
 
 (defun sspai--atomic-write-text (file text)
   "Atomically replace local regular FILE with TEXT."
@@ -1004,18 +578,19 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
       (when (and temporary (file-exists-p temporary))
         (ignore-errors (delete-file temporary))))))
 
-(defun sspai--write-source (file meta body)
-  "Safely checkpoint Org FILE with META and BODY."
+(defun sspai--write-source (file meta)
+  "Save publication fields from META without rewriting FILE's editorial text."
   (sspai--validate-source-file file)
-  (sspai--atomic-write-text
-   file (sspai--format-org-source (sspai--read-file-text file) meta body))
+  (sspai--assert-source-unchanged file meta)
+  (let ((text (sspai--format-org-source (plist-get meta :source-text) meta)))
+    (sspai--atomic-write-text file text)
+    (setf (plist-get meta :source-text) text))
   (when-let* ((buffer (find-buffer-visiting (expand-file-name file))))
     (with-current-buffer buffer
-      (unless (buffer-modified-p)
-        (revert-buffer t t t)))))
+      (revert-buffer t t t))))
 
-(defun sspai--create-source (file meta body)
-  "Create a new Org FILE from META and BODY without overwriting."
+(defun sspai--create-source (file title)
+  "Create a local Org FILE with TITLE without overwriting."
   (sspai--validate-source-file file)
   (let* ((file (expand-file-name file))
          (directory (file-name-directory file)))
@@ -1025,7 +600,7 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
       (user-error "sspai: 目标路径已被占用，拒绝覆盖：%s" file))
     (make-directory directory t)
     (with-temp-buffer
-      (insert (sspai--format-org-source "" meta body))
+      (insert "#+TITLE: " (or title "") "\n\n")
       (let ((coding-system-for-write 'utf-8-unix))
         (write-region (point-min) (point-max) file nil 'silent nil 'excl)))
     (find-file file)
@@ -1246,9 +821,9 @@ Return (CONTENT-TYPE . UNIBYTE-BODY)."
           "/matrix/editor/attachment/upload/token/get"
           `((cname . ,filename)))))
     (unless (and data
-                 (stringp (sspai--object-get data 'token))
+                 (stringp (alist-get 'token data))
                  (not (string-empty-p
-                       (sspai--object-get data 'token))))
+                       (alist-get 'token data))))
       (signal 'sspai-api-error
               (list "上传凭据缺少 token")))
     data))
@@ -1256,12 +831,12 @@ Return (CONTENT-TYPE . UNIBYTE-BODY)."
 (defun sspai--qiniu-upload (filename mime bytes credential)
   "Upload BYTES to Qiniu with SSPAI CREDENTIAL.
 Return a plist containing :url, :key, :id, and :hash."
-  (let* ((token (sspai--object-get credential 'token))
-         (issued-key (sspai--object-get credential 'key))
+  (let* ((token (alist-get 'token credential))
+         (issued-key (alist-get 'key credential))
          (attachment-id
           (or (sspai--integer
                "attachment id"
-               (sspai--object-get credential 'id)
+               (alist-get 'id credential)
                t)
               0))
          (fields
@@ -1271,11 +846,9 @@ Return a plist containing :url, :key, :id, and :hash."
              `(("key" . ,issued-key)))))
          (multipart
           (sspai--multipart-body fields filename mime bytes))
-         (upload-origin
-          (sspai--normalize-origin "upload URL" sspai-upload-url))
          (response
           (sspai--http
-           "POST" (concat upload-origin "/")
+           "POST" "https://upload.qiniup.com/"
            :data (cdr multipart)
            :content-type (car multipart)
            :redact (list token)
@@ -1290,22 +863,22 @@ Return a plist containing :url, :key, :id, and :hash."
         (format "Qiniu HTTP %s：%s"
                 status (sspai--json-error-message json body)))))
     (when-let* ((qiniu-error
-                (and json (sspai--object-get json 'error))))
+                 (and json (alist-get 'error json))))
       (unless (and (integerp qiniu-error) (zerop qiniu-error))
         (signal 'sspai-api-error
                 (list (sspai--json-error-message json body)))))
-    (let ((key (or (and json (sspai--object-get json 'key))
+    (let ((key (or (and json (alist-get 'key json))
                    issued-key)))
       (unless (and (stringp key) (not (string-empty-p key)))
         (signal 'sspai-api-error
                 (list "Qiniu 响应与 SSPAI 凭据都缺少 attachment key")))
       (list
        :url (concat
-             (replace-regexp-in-string "/+\\'" "" sspai-cdn-base-url)
+             "https://cdnfile.sspai.com"
              "/" key)
        :key key
        :id attachment-id
-       :hash (and json (sspai--object-get json 'hash))))))
+       :hash (and json (alist-get 'hash json))))))
 
 (defun sspai--upload-image-bytes (bytes mime context)
   "Upload image BYTES of MIME for CONTEXT and return an upload plist."
@@ -1393,14 +966,14 @@ duplicate upload on retry."
   "Return SSPAI attachment key from CDN URL, or nil."
   (let ((prefix
          (concat
-          (replace-regexp-in-string "/+\\'" "" sspai-cdn-base-url)
+          "https://cdnfile.sspai.com"
           "/")))
     (when (and (stringp url) (string-prefix-p prefix url))
       (substring url (length prefix)))))
 
 (defun sspai--canonical-banner-key (value)
   "Normalize SSPAI banner VALUE to an attachment key."
-  (let ((banner (or (sspai--value-string value) "")))
+  (let ((banner (or value "")))
     (cond
      ((string-empty-p banner) "")
      ((string-match-p "\\`https://" banner)
@@ -1465,22 +1038,12 @@ Call CHECKPOINT immediately after a new remote upload."
 
 ;;;; Matrix article API
 
-(defun sspai--json-array-list (value field)
-  "Return JSON array VALUE as a list for FIELD."
-  (cond
-   ((vectorp value) (append value nil))
-   ((null value) nil)
-   ;; Also accept list arrays supplied by tests or a caller.  Service JSON
-   ;; itself is parsed with vectors so empty arrays remain distinct from null.
-   ((listp value) value)
-   (t (error "sspai: 服务端的 %s 不是数组：%S" field value))))
-
 (defun sspai--tag-title (tag)
   "Return the non-empty title from one standard SSPAI TAG object."
-  (unless (or (listp tag) (hash-table-p tag))
+  (unless (listp tag)
     (error "sspai: 服务端返回了无效的标准标签：%S" tag))
   (sspai--required-string "remote tag.title"
-                          (sspai--object-get tag 'title)))
+                          (alist-get 'title tag)))
 
 (defun sspai--standard-tag-summary (tags)
   "Return a stable vector summarizing standard SSPAI TAGS."
@@ -1488,162 +1051,39 @@ Call CHECKPOINT immediately after a new remote upload."
    (sort
     (mapcar
      (lambda (tag)
-       `((id . ,(sspai--object-get tag 'id))
+       `((id . ,(alist-get 'id tag))
          (title . ,(sspai--tag-title tag))))
-     (sspai--json-array-list tags "tags"))
+     tags)
     (lambda (left right)
-      (let ((left-title (sspai--object-get left 'title))
-            (right-title (sspai--object-get right 'title)))
+      (let ((left-title (alist-get 'title left))
+            (right-title (alist-get 'title right)))
         (if (string-equal left-title right-title)
-            (string< (format "%s" (sspai--object-get left 'id))
-                     (format "%s" (sspai--object-get right 'id)))
+            (string< (format "%s" (alist-get 'id left))
+                     (format "%s" (alist-get 'id right)))
           (string< left-title right-title)))))))
 
 (defun sspai--normalize-article (object)
-  "Normalize a complete Matrix editor article OBJECT.
-The per-article editing token remains only in the returned in-memory plist and
-its private :raw object.  Neither value is ever written to a source file."
-  (unless (or (listp object) (hash-table-p object))
-    (error "sspai: article 响应不是 object"))
-  (let* ((id (sspai--integer "article.id"
-                             (sspai--object-get object 'id)))
-         (type (sspai--integer "article.type"
-                               (sspai--object-get object 'type)
-                               t))
-         (token-value (sspai--object-get object 'token))
-         (token
-          (and (stringp token-value)
-               (not (string-empty-p token-value))
-               token-value))
-         (title
-          (or (sspai--value-string
-               (sspai--object-get object 'title))
-              ""))
-         (title-last
-          (if (sspai--object-member-p object 'title_last)
-              (or (sspai--value-string
-                   (sspai--object-get object 'title_last))
-                  "")
-            title))
-         (body
-          (or (sspai--value-string
-               (sspai--object-get object 'body))
-              ""))
-         (body-last
-          (if (sspai--object-member-p object 'body_last)
-              (or (sspai--value-string
-                   (sspai--object-get object 'body_last))
-                  "")
-            body))
-         (banner
-          (or (sspai--value-string
-               (sspai--object-get object 'banner))
-              ""))
-         (banner-id
-          (or (sspai--integer
-               "article.banner_id"
-               (sspai--object-get object 'banner_id)
-               t)
-              0))
-         (banner-key
-          (let ((key (sspai--canonical-banner-key banner)))
-            (unless (string-empty-p key) key)))
-         (banner-url
-          (and banner-key
-               (concat
-                (replace-regexp-in-string
-                 "/+\\'" "" sspai-cdn-base-url)
-                "/" banner-key)))
-         (standard-tags
-          (let ((value (sspai--object-get object 'tags)))
-            (vconcat (sspai--json-array-list value "tags"))))
-         (custom-tags
-          (sspai--normalize-tags
-           (sspai--object-get object 'custom_tags)))
-         (all-tags
-          (sspai--normalize-tags
-           (append
-            (mapcar #'sspai--tag-title
-                    (append standard-tags nil))
-            custom-tags)))
-         (allow-comment
-          (sspai--boolean
-           "article.allow_comment"
-           (sspai--object-get object 'allow_comment)
-           t))
-         (benefits-on
-          (sspai--boolean
-           "article.benefits_statement_on"
-           (sspai--object-get object 'benefits_statement_on)
-           nil))
-         (benefits-id
-          (or (sspai--integer
-               "article.benefits_statement_id"
-               (sspai--object-get object 'benefits_statement_id)
-               t)
-              0))
-         (free
-          (if (sspai--object-member-p object 'free)
-              (sspai--boolean
-               "article.free" (sspai--object-get object 'free) nil)
-            t))
-         (delete-status
-          (sspai--boolean
-           "article.delete_status"
-           (sspai--object-get object 'delete_status)
-           nil))
-         (updated-at
-          (or
-           (sspai--integer
-            "article.body_updated_at"
-            (sspai--object-get object 'body_updated_at)
-            t)
-           (sspai--integer
-            "article.updated_at"
-            (sspai--object-get object 'updated_at)
-            t)
-           0)))
-    (unless id
-      (error "sspai: article 响应缺少正整数 id"))
-    (unless (integerp type)
-      (error "sspai: article 响应缺少整数 type"))
-    (when (and banner-key (zerop banner-id))
-      (error "sspai: article banner 存在但 banner_id 缺失"))
-    (when (and benefits-on (zerop benefits-id))
-      (error
-       "sspai: article 开启利益声明但 statement id 缺失"))
-    (list
-     :id id
-     :token token
-     :type type
-     :status (sspai--type-status type)
-     :free free
-     :delete-status delete-status
-     :title title-last
-     :body body-last
-     :published-title title
-     :published-body body
-     :banner banner
-     :banner-id banner-id
-     :banner-key banner-key
-     :banner-url banner-url
-     :standard-tags standard-tags
-     :custom-tags custom-tags
-     :tags all-tags
-     :allow-comment allow-comment
-     :benefits-statement-on benefits-on
-     :benefits-statement-id benefits-id
-     :updated-at updated-at
-     :raw (copy-tree object t))))
+  "Keep the fields required for publishing article OBJECT.
+The complete API object and editing token stay in memory only."
+  (let ((id (sspai--integer "article.id" (alist-get 'id object)))
+        (type (sspai--integer "article.type" (alist-get 'type object) t)))
+    (unless (and id type)
+      (error "sspai: article 响应缺少 id 或 type"))
+    (list :id id :type type
+          :status (sspai--type-status type)
+          :token (alist-get 'token object)
+          :title (alist-get 'title_last object)
+          :body (alist-get 'body_last object)
+          :free (sspai--boolean "article.free" (alist-get 'free object) t)
+          :delete-status (sspai--boolean "article.delete_status"
+                                         (alist-get 'delete_status object))
+          :standard-tags (alist-get 'tags object)
+          :raw object)))
 
 (defun sspai--api-error-code-or-status (err)
   "Return numeric API error code or HTTP status carried by ERR."
   (let ((value (caddr err)))
     (and (integerp value) value)))
-
-(defun sspai--api-error-kind (err)
-  "Return the structured origin marker carried by ERR, if any."
-  (nth 4 err))
 
 (defun sspai--api-error-not-found-p (err)
   "Return non-nil when ERR means the article does not exist."
@@ -1653,20 +1093,11 @@ its private :raw object.  Neither value is ever written to a source file."
   "Return non-nil when ERR contains a server rejection code.
 Transport failures have no numeric code and therefore remain ambiguous."
   (let ((code (sspai--api-error-code-or-status err))
-        (kind (sspai--api-error-kind err)))
-    (cond
-     ((eq kind 'envelope) (integerp code))
-     ((eq kind 'invalid-success) nil)
-     ((eq kind 'http)
-      (and (integerp code)
-           (<= 400 code) (< code 500)
-           (/= code 408)))
-     ;; Preserve callers that signal the older three-field condition while
-     ;; remaining conservative about HTTP 5xx and request timeouts.
-     (t
-      (and (integerp code)
-           (<= 400 code) (< code 500)
-           (/= code 408))))))
+        (kind (nth 4 err)))
+    (and (integerp code)
+         (or (eq kind 'envelope)
+             (and (eq kind 'http) (<= 400 code) (< code 500)
+                  (/= code 408))))))
 
 (defun sspai--article-get (id &optional allow-missing)
   "Get and normalize article ID.
@@ -1790,59 +1221,45 @@ service fields and the transient article token are preserved."
                        (plist-get remote :token))))
       (signal 'sspai-api-error
               (list "article 响应缺少本次更新所需的编辑 token")))
-    (setq raw (sspai--object-set raw 'type target-type))
-    (setq raw (sspai--object-set
-               raw 'banner (or (car-safe banner-pair) "")))
-    (setq raw (sspai--object-set
-               raw 'banner_id (or (cdr-safe banner-pair) 0)))
-    (setq raw (sspai--object-set raw 'title_last title))
-    (setq raw (sspai--object-set raw 'body_last html))
-    (setq raw
-          (sspai--object-set
-           raw 'allow_comment
-           (sspai--bool-json (plist-get meta :allow-comment))))
-    (setq raw (sspai--object-set raw 'tags (car tag-payloads)))
-    (setq raw (sspai--object-set
-               raw 'custom_tags (cdr tag-payloads)))
-    (setq raw
-          (sspai--object-set
-           raw 'benefits_statement_on
-           (sspai--bool-json
-            (plist-get meta :benefits-statement-on))))
-    (setq raw
-          (sspai--object-set
-           raw 'benefits_statement_id
-           (or (plist-get meta :benefits-statement-id) 0)))
-    (setq raw (sspai--object-set raw 'delete_status :json-false))
-    ;; Community publication commits the edit.  Audit submission leaves the
-    ;; currently published fields alone until the service finishes review.
+    (setf (alist-get 'type raw) target-type
+          (alist-get 'banner raw) (or (car banner-pair) "")
+          (alist-get 'banner_id raw) (or (cdr banner-pair) 0)
+          (alist-get 'title_last raw) title
+          (alist-get 'body_last raw) html
+          (alist-get 'allow_comment raw)
+          (sspai--bool-json (plist-get meta :allow-comment))
+          (alist-get 'tags raw) (car tag-payloads)
+          (alist-get 'custom_tags raw) (cdr tag-payloads)
+          (alist-get 'benefits_statement_on raw)
+          (sspai--bool-json (plist-get meta :benefits-statement-on))
+          (alist-get 'benefits_statement_id raw)
+          (or (plist-get meta :benefits-statement-id) 0)
+          (alist-get 'delete_status raw) :json-false)
+    ;; Editorial review leaves the currently published content in place.
     (when (eq action 'community)
-      (setq raw (sspai--object-set raw 'title title))
-      (setq raw (sspai--object-set raw 'body html)))
+      (setf (alist-get 'title raw) title
+            (alist-get 'body raw) html))
     raw))
 
 (defun sspai--update-core (object action)
   "Return the intentional update fields from article OBJECT for ACTION."
-  (let ((tags (sspai--object-get object 'tags))
+  (let ((tags (alist-get 'tags object))
         (custom-tags
-         (sspai--normalize-tags
-          (sspai--object-get object 'custom_tags))))
-    `((type . ,(sspai--object-get object 'type))
+         (alist-get 'custom_tags object)))
+    `((type . ,(alist-get 'type object))
       (banner
        . ,(sspai--canonical-banner-key
-           (sspai--object-get object 'banner)))
-      (banner_id . ,(or (sspai--object-get object 'banner_id) 0))
-      (title_last . ,(or (sspai--value-string
-                          (sspai--object-get object 'title_last))
+           (alist-get 'banner object)))
+      (banner_id . ,(or (alist-get 'banner_id object) 0))
+      (title_last . ,(or (alist-get 'title_last object)
                          ""))
-      (body_last . ,(or (sspai--value-string
-                         (sspai--object-get object 'body_last))
+      (body_last . ,(or (alist-get 'body_last object)
                         ""))
       (allow_comment
        . ,(sspai--bool-json
            (sspai--boolean
             "article.allow_comment"
-            (sspai--object-get object 'allow_comment)
+            (alist-get 'allow_comment object)
             t)))
       (tags . ,(sspai--standard-tag-summary tags))
       (custom_tags . ,(vconcat custom-tags))
@@ -1850,22 +1267,20 @@ service fields and the transient article token are preserved."
        . ,(sspai--bool-json
            (sspai--boolean
             "article.benefits_statement_on"
-            (sspai--object-get object 'benefits_statement_on)
+            (alist-get 'benefits_statement_on object)
             nil)))
       (benefits_statement_id
-       . ,(or (sspai--object-get object 'benefits_statement_id) 0))
+       . ,(or (alist-get 'benefits_statement_id object) 0))
       (delete_status
        . ,(sspai--bool-json
            (sspai--boolean
             "article.delete_status"
-            (sspai--object-get object 'delete_status)
+            (alist-get 'delete_status object)
             nil)))
       ,@(when (eq action 'community)
-          `((title . ,(or (sspai--value-string
-                           (sspai--object-get object 'title))
+          `((title . ,(or (alist-get 'title object)
                           ""))
-            (body . ,(or (sspai--value-string
-                          (sspai--object-get object 'body))
+            (body . ,(or (alist-get 'body object)
                          "")))))))
 
 (defun sspai--auto-save-confirmed (remote title html)
@@ -1939,126 +1354,14 @@ Only that status transition is allowed; every other requested field must match."
 
 ;;;; In-flight source checks and publication state
 
-(defun sspai--body-image-references (file raw-body)
-  "Return local-or-remote image references found in FILE's RAW-BODY.
-The Org exporter handles publication; this conservative scanner only
-adds dependency fingerprints so replacing bytes at an unchanged local path is
-detectable while publishing; these fingerprints are never saved in metadata."
-  (let (references)
-    (cl-labels
-        ((remember
-          (value)
-          (when (and (stringp value)
-                     (not (string-empty-p value))
-                     (not (member value references)))
-            (push value references)))
-         (scan
-          (regexp group)
-          (let ((position 0))
-            (while (string-match regexp raw-body position)
-              (remember (match-string group raw-body))
-              (setq position
-                    (max (match-end 0) (1+ position)))))))
-      (sspai--validate-source-file file)
-      (scan "<img\\(?:[^>]*?\\)[ \t\n]+src=[\"']\\([^\"']+\\)[\"']" 1)
-      (scan "\\[\\[file:\\([^]\n]+\\)\\]" 1))
-    (nreverse references)))
-
-(defun sspai--reference-fingerprint (reference base-dir)
-  "Return a stable dependency fingerprint for REFERENCE below BASE-DIR.
-External URLs return nil.  Missing local files produce a marker so deletion is
-also detected as a local change."
-  (cond
-   ((string-prefix-p "data:" reference)
-    ;; The URI bytes already occur in the source hash; no filesystem
-    ;; dependency is needed.
-    nil)
-   (t
-    (condition-case err
-        (let ((path
-               (sspai--normalize-local-reference
-                reference base-dir)))
-          (cond
-           ((eq path 'external) nil)
-           ((and (file-regular-p path) (file-readable-p path))
-            (concat reference "="
-                    (secure-hash
-                     'sha256 (sspai--read-file-bytes path))))
-           (t (concat reference "=<missing>"))))
-      (error
-       (concat reference "=<invalid:"
-               (secure-hash
-                'sha256 (error-message-string err))
-               ">"))))))
-
-(defun sspai--local-dependency-fingerprints (file meta raw-body)
-  "Return a sorted vector of local image fingerprints for FILE."
-  (if (null file)
-      (let ((saved (plist-get meta :banner-hash)))
-        (if saved (vector (concat "banner=" saved)) []))
-    (let* ((base-dir
-            (file-name-directory (expand-file-name file)))
-           (references
-           (append
-             (when (plist-get meta :banner)
-               (list (plist-get meta :banner)))
-             (sspai--body-image-references file raw-body)))
-           values)
-      (dolist (reference references)
-        (when-let* ((fingerprint
-                    (sspai--reference-fingerprint
-                     reference base-dir)))
-          (push fingerprint values)))
-      (vconcat (sort (delete-dups values) #'string<)))))
-
-(defun sspai--source-fingerprint (meta raw-body &optional file)
-  "Fingerprint local META and RAW-BODY only for in-flight write checks.
-Include FILE image dependencies.  This value is never stored in source files."
-  (sspai--hash-json
-   `((title . ,(or (plist-get meta :title) ""))
-     (body . ,(sspai--trim-body raw-body))
-     (banner . ,(or (plist-get meta :banner) ""))
-     (dependencies
-      . ,(sspai--local-dependency-fingerprints
-          file meta raw-body))
-     (tags . ,(vconcat (plist-get meta :tags)))
-     (status . ,(plist-get meta :status))
-     (allow_comment
-      . ,(sspai--bool-json
-          (plist-get meta :allow-comment)))
-     (benefits_statement_on
-      . ,(sspai--bool-json
-          (plist-get meta :benefits-statement-on)))
-     (benefits_statement_id
-      . ,(or (plist-get meta :benefits-statement-id) 0)))))
-
-(defun sspai--copy-meta (meta)
-  "Return META with an independently copied image cache."
-  (let ((copy (copy-sequence meta)))
-    (plist-put
-     copy :image-cache
-     (copy-hash-table (plist-get meta :image-cache)))))
-
-(defun sspai--assert-source-unchanged
-    (file expected-meta expected-body)
-  "Refuse a checkpoint when editable FILE changed during a network operation."
-  (pcase-let* ((`(,current-meta ,current-body)
-                 (sspai--read-source file))
-                (expected
-                 (sspai--source-fingerprint
-                  expected-meta expected-body file))
-                (current
-                 (sspai--source-fingerprint
-                  current-meta current-body file)))
-    (unless (string-equal expected current)
-      (signal
-       'sspai-source-changed
-       '("网络操作期间源稿或本地图片发生变化；拒绝覆盖新内容")))))
-
-(defun sspai--checkpoint-image-cache (file meta raw-body)
-  "Persist META's upload cache while preserving editable RAW-BODY."
-  (sspai--assert-source-unchanged file meta raw-body)
-  (sspai--write-source file meta raw-body))
+(defun sspai--assert-source-unchanged (file meta)
+  "Refuse a checkpoint if FILE or its visiting buffer changed since META was read."
+  (when (or (when-let* ((buffer (find-buffer-visiting file)))
+              (buffer-modified-p buffer))
+            (not (equal (plist-get meta :source-text)
+                        (sspai--read-file-text file))))
+    (signal 'sspai-source-changed
+            '("网络操作期间源稿发生变化；拒绝覆盖新内容"))))
 
 (defun sspai--state (file)
   "Read local source FILE and fetch its current remote article, if tracked."
@@ -2073,7 +1376,7 @@ Include FILE image dependencies.  This value is never stored in source files."
 (defun sspai--status-label (status)
   "Return a Chinese label for article tracking STATUS."
   (pcase status
-    ('new "尚未创建远端草稿")
+    ('new "尚未发布")
     ('tracked "已关联远端文章，以本地稿件为准")
     ('remote-deleted "远端文章不存在或已删除")
     (_ (format "%S" status))))
@@ -2087,7 +1390,7 @@ Include FILE image dependencies.  This value is never stored in source files."
   (let ((file (expand-file-name buffer-file-name)))
     (sspai--validate-source-file file)
     (when (file-remote-p file)
-      (user-error "sspai: 发布与同步不支持远程源稿"))
+      (user-error "sspai: 发布不支持远程源稿"))
     (when (file-symlink-p file)
       (user-error "sspai: 拒绝从符号链接源稿发布"))
     (unless (and (file-exists-p file)
@@ -2106,55 +1409,26 @@ Include FILE image dependencies.  This value is never stored in source files."
 
 (defun sspai--publication-meta (meta remote)
   "Copy local META and record REMOTE identity and publication status only."
-  (let ((updated (sspai--copy-meta meta)))
+  (let ((updated (copy-sequence meta)))
     (setf (plist-get updated :id) (plist-get remote :id)
           (plist-get updated :status) (plist-get remote :status))
     updated))
 
 (defun sspai--checkpoint-pushed
-    (file expected-meta raw-body remote)
+    (file expected-meta remote)
   "Checkpoint REMOTE after a successful write to FILE."
   (let ((updated
          (sspai--publication-meta expected-meta remote)))
     (condition-case err
-        (progn
-          (sspai--assert-source-unchanged
-           file expected-meta raw-body)
-          (sspai--write-source file updated raw-body))
+        (sspai--write-source file updated)
       (error
        (signal
         'sspai-published-but-not-checkpointed
         (list
          (concat
-          "少数派远端已经写入，但本地 checkpoint 失败；"
+          (format "少数派文章 %s 已写入，但本地状态保存失败；"
+                  (plist-get remote :id))
           "请勿直接重发。"
-          (error-message-string err))))))
-    updated))
-
-(defun sspai--checkpoint-created-interim
-    (file expected-meta intended-meta raw-body remote action)
-  "Immediately persist a newly created REMOTE id before follow-up ACTION.
-Editable values remain those in INTENDED-META, so an interrupted publish can
-be retried using the recorded article ID without creating another draft."
-  (let ((updated
-         (sspai--publication-meta intended-meta remote)))
-    (setq updated
-          (plist-put updated :status
-                     (pcase action
-                       ('community "published")
-                       ('audit "audit"))))
-    (condition-case err
-        (progn
-          (sspai--assert-source-unchanged
-           file expected-meta raw-body)
-          (sspai--write-source file updated raw-body))
-      (error
-       (signal
-        'sspai-published-but-not-checkpointed
-        (list
-         (concat
-          "草稿已经创建，但文章 ID 无法写回源稿；"
-          "请先在网页后台记录新草稿，切勿直接重试。"
           (error-message-string err))))))
     updated))
 
@@ -2189,14 +1463,11 @@ be retried using the recorded article ID without creating another draft."
 (defun sspai--prepare-write-assets (file meta raw-body)
   "Convert and upload FILE assets described by META and RAW-BODY.
 Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
-  (let* ((title (sspai--validate-write-meta meta))
-         (_title title)
-         (html
+  (let* ((html
           (sspai--source-to-html file raw-body))
          (checkpoint
           (lambda ()
-            (sspai--checkpoint-image-cache
-             file meta raw-body)))
+            (sspai--write-source file meta)))
          (rewritten
           (sspai--rewrite-body-images
            html
@@ -2205,7 +1476,7 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
            checkpoint))
          (banner-pair
           (sspai--prepare-banner file meta checkpoint)))
-    (sspai--assert-source-unchanged file meta raw-body)
+    (sspai--assert-source-unchanged file meta)
     (list rewritten banner-pair)))
 
 (defun sspai--remote-editable-p (remote)
@@ -2247,46 +1518,22 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
                (sspai--action-label action) title)
        sspai-confirm-before-write))
     (pcase-let* ((`(,html ,banner-pair)
-                   (sspai--prepare-write-assets
-                    file meta raw-body))
-                  (title (plist-get meta :title))
-                  (intended-meta (sspai--copy-meta meta)))
-      (if remote
-          (let* ((after-autosave
-                  (sspai--auto-save-confirmed
-                   remote title html))
-                 (payload
-                  (sspai--full-update-payload
-                   after-autosave intended-meta
-                   html banner-pair action))
-                 (written
-                  (sspai--full-update-confirmed
-                   after-autosave payload action)))
-            (sspai--checkpoint-pushed
-             file meta raw-body written)
-            (message "sspai: 已%s并保存发布状态"
-                     (sspai--write-result-label action written))
-            written)
-        ;; The editor API first creates an article record (type 4), then
-        ;; publishes it with type 5 or submits it with type 2.  Persist its ID
-        ;; before proceeding so an interrupted publish cannot create duplicates.
-        (let* ((created
-                (sspai--article-add
-                 (sspai--article-add-payload intended-meta html banner-pair)))
-               (interim
-                (sspai--checkpoint-created-interim
-                 file meta intended-meta raw-body created action))
-               (after-autosave
-                (sspai--auto-save-confirmed created title html))
-               (payload
-                (sspai--full-update-payload
-                 after-autosave intended-meta html banner-pair action))
-               (written
-                (sspai--full-update-confirmed after-autosave payload action)))
-          (sspai--checkpoint-pushed file interim raw-body written)
-          (message "sspai: 已%s并保存发布状态"
-                   (sspai--write-result-label action written))
-          written)))))
+                  (sspai--prepare-write-assets
+                   file meta raw-body))
+                 (title (plist-get meta :title)))
+      (unless remote
+        ;; Save the ID before follow-up requests so retries update this article.
+        (setq remote (sspai--article-add
+                      (sspai--article-add-payload meta html banner-pair))
+              meta (sspai--checkpoint-pushed file meta remote)))
+      (let* ((saved (sspai--auto-save-confirmed remote title html))
+             (payload (sspai--full-update-payload
+                       saved meta html banner-pair action))
+             (written (sspai--full-update-confirmed saved payload action)))
+        (sspai--checkpoint-pushed file meta written)
+        (message "sspai: 已%s并保存发布状态"
+                 (sspai--write-result-label action written))
+        written))))
 
 ;;;###autoload
 (defun sspai-publish-community ()
@@ -2327,22 +1574,6 @@ The resulting audit state is locked by the service."
 
 ;;;; Creating local Org sources
 
-(defun sspai--new-meta (&optional title)
-  "Return fresh source metadata with optional TITLE."
-  (list
-   :id nil
-   :status nil
-   :title (or title "")
-   :banner nil
-   :tags nil
-   :allow-comment t
-   :benefits-statement-on nil
-   :benefits-statement-id 0
-   :banner-id 0
-   :banner-key nil
-   :banner-hash nil
-   :image-cache (make-hash-table :test #'equal)))
-
 ;;;###autoload
 (defun sspai-new-article (file &optional title)
   "Create a new Org SSPAI source FILE with optional TITLE."
@@ -2352,7 +1583,7 @@ The resulting audit state is locked by the service."
      "少数派源稿（.org）: "
      default-directory nil nil)))
   (sspai--create-source
-   file (sspai--new-meta title) "")
+   file title)
   (message "sspai: 已创建文章源稿：%s" file))
 
 (provide 'sspai)
