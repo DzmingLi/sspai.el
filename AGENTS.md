@@ -21,7 +21,6 @@
   upload local body images. Use one internal constant for the 5 MB image upload
   limit; do not add a 2 MB recommendation threshold or warning.
 - Export body headings starting at h2; the article title occupies h1.
-- Match the web editor's title word-count algorithm and reference value 32.
-  This is a count warning, not a display-width check or a submission blocker.
+- Require a non-empty title; do not add advisory title-length counters or warnings.
 - Run `make check` before publishing changes. Tests must stay offline and must
   not read real Firefox cookies or publish real articles.

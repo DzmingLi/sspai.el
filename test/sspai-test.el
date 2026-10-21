@@ -1115,32 +1115,6 @@
     (should-error (sspai--write-state "/tmp/article.org" nil 'draft)
                   :type 'user-error)))
 
-(ert-deftest sspai-test-title-count-matches-web-editor ()
-  ;; Expected counts were evaluated with the official calcWordCount JavaScript.
-  (dolist (case '(("" 0) ("一个05后的个人数码编年史" 12)
-                  ("Hello world" 2) ("a b c d" 2) ("AI2026" 2)
-                  ("你好，世界！" 6) ("你好。" 2)
-                  ("a" 1) ("a1" 1) ("abc1x" 2) ("1234" 1) ("1 2 3" 2)
-                  ("!!!" 1) ("。" 0) ("。。" 1)
-                  ("😀" 1) ("😀😀" 1) ("👨‍👩‍👧‍👦" 3)
-                  ("<b>你好</b>&nbsp;Emacs" 3) ("<>a" 1) ("&NBSP;" 2)
-                  ("éé" 1) ("㐀㐀㐀㐀" 1)
-                  ("\u0085\u0085\u0085\u0085" 1)
-                  ("\ufeffa\u3000b" 1) ("a\r\nb\tc\nd" 2)))
-    (should (= (sspai--title-word-count (car case)) (cadr case)))))
-
-(ert-deftest sspai-test-title-reference-limit-warns-without-blocking ()
-  (let (messages)
-    (cl-letf (((symbol-function 'message)
-               (lambda (format-string &rest args)
-                 (push (apply #'format format-string args) messages))))
-      (let ((title (make-string sspai--title-count-limit ?中)))
-        (should (equal (sspai--validate-write-meta (sspai-test--metadata title)) title))
-        (should-not messages)
-        (setq title (concat title "文"))
-        (should (equal (sspai--validate-write-meta (sspai-test--metadata title)) title))
-        (should (equal messages '("sspai: 标题字数为 33，超过网页参考值 32")))))))
-
 (ert-deftest sspai-test-org-checkpoint-is-idempotent ()
   (sspai-test--with-temp-file
    ".org" "#+TITLE: Title\n#+AUTHOR: Alice\n\n* Heading\n\nBody\n"
