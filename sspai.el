@@ -482,7 +482,6 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
 
 (defun sspai--read-source (file)
   "Return (META RAW-BODY) from Org FILE."
-  (sspai--validate-source-file file)
   (sspai--org-meta-and-body (sspai--read-file-text file)))
 
 ;;;; Source formatting and safe checkpoints
@@ -549,7 +548,6 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
 
 (defun sspai--write-source (file meta)
   "Save publication fields from META without rewriting FILE's editorial text."
-  (sspai--validate-source-file file)
   (sspai--assert-source-unchanged file meta)
   (let ((text (sspai--format-org-source (plist-get meta :source-text) meta)))
     (sspai--atomic-write-text file text)
@@ -579,7 +577,6 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
 
 (defun sspai--source-to-html (file raw-body)
   "Export Org RAW-BODY from FILE using the built-in HTML exporter."
-  (sspai--validate-source-file file)
   (let ((default-directory (file-name-directory (expand-file-name file)))
         (org-export-use-babel nil)
         (org-export-allow-bind-keywords nil)
@@ -1127,8 +1124,7 @@ new names become custom tags because the standard API requires server IDs."
 
 (defun sspai--article-add-payload (meta html banner-pair)
   "Return the exact non-idempotent add payload for META, HTML and BANNER-PAIR."
-  (let* ((title
-          (sspai--required-string "title" (plist-get meta :title)))
+  (let* ((title (plist-get meta :title))
          (tags (sspai--tag-payloads (plist-get meta :tags) nil)))
     `((type . 4)
       (banner . ,(or (car-safe banner-pair) ""))
@@ -1147,9 +1143,6 @@ new names become custom tags because the standard API requires server IDs."
 (defun sspai--article-auto-save-payload (remote title html)
   "Return the exact auto-save payload for REMOTE, TITLE, and HTML."
   (let ((token (plist-get remote :token)))
-    (unless (and (stringp token) (not (string-empty-p token)))
-      (signal 'sspai-api-error
-              (list "article 响应缺少本次更新所需的编辑 token")))
     `((id . ,(plist-get remote :id))
       (token . ,token)
       (title_last . ,title)
@@ -1161,27 +1154,14 @@ new names become custom tags because the standard API requires server IDs."
   "Return a complete update object based on REMOTE.
 META, HTML, BANNER-PAIR, and ACTION supply intentional edits while all unknown
 service fields and the transient article token are preserved."
-  (unless (memq action '(community audit))
-    (error "sspai: 未知写入动作：%S" action))
   (let* ((raw (copy-tree (plist-get remote :raw) t))
-         (title
-          (sspai--required-string "title" (plist-get meta :title)))
+         (title (plist-get meta :title))
          (tag-payloads
           (sspai--tag-payloads (plist-get meta :tags) remote))
          (target-type
           (pcase action
             ('community 5)
             ('audit 2))))
-    (unless (and (listp raw)
-                 (memq (plist-get remote :type)
-                       sspai--editable-types)
-                 (plist-get remote :free))
-      (user-error "sspai: 当前远端状态不可编辑"))
-    (unless (and (stringp (plist-get remote :token))
-                 (not (string-empty-p
-                       (plist-get remote :token))))
-      (signal 'sspai-api-error
-              (list "article 响应缺少本次更新所需的编辑 token")))
     (setf (alist-get 'type raw) target-type
           (alist-get 'banner raw) (or (car banner-pair) "")
           (alist-get 'banner_id raw) (or (cdr banner-pair) 0)
@@ -1264,7 +1244,7 @@ service fields and the transient article token are preserved."
         (if (and fetched
                  (string-equal title (plist-get fetched :title))
                  (string-equal html (plist-get fetched :body)))
-            fetched
+            (sspai--require-editable-article fetched)
           (signal (car original-error) (cdr original-error)))))))
 
 (defun sspai--update-matches-p (remote payload action)
@@ -1397,21 +1377,6 @@ Only that status transition is allowed; every other requested field must match."
       "提交（少数派已转入审核，尚未公开）"
     (sspai--action-label action)))
 
-(defun sspai--validate-write-meta (meta)
-  "Validate user-editable META before any remote side effect."
-  (let ((title
-         (sspai--required-string "title"
-                                 (plist-get meta :title))))
-    (when (and (plist-get meta :benefits-statement-on)
-               (not (> (or
-                        (plist-get meta
-                                   :benefits-statement-id)
-                        0)
-                       0)))
-      (user-error
-       "sspai: 开启利益相关声明时必须设置正整数 statement id"))
-    title))
-
 (defun sspai--prepare-write-assets (file meta raw-body)
   "Convert and upload FILE assets described by META and RAW-BODY.
 Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
@@ -1431,13 +1396,17 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
     (sspai--assert-source-unchanged file meta)
     (list rewritten banner-pair)))
 
-(defun sspai--remote-editable-p (remote)
-  "Return non-nil when REMOTE is currently writable."
-  (and remote
-       (memq (plist-get remote :type)
-             sspai--editable-types)
-       (plist-get remote :free)
-       (not (plist-get remote :delete-status))))
+(defun sspai--require-editable-article (remote)
+  "Check editing permissions and token in REMOTE, and return it."
+  (unless (and (memq (plist-get remote :type) sspai--editable-types)
+               (plist-get remote :free)
+               (not (plist-get remote :delete-status)))
+    (user-error "sspai: 远端文章已锁定，不能更新"))
+  (let ((token (plist-get remote :token)))
+    (unless (and (stringp token) (not (string-empty-p token)))
+      (signal 'sspai-api-error
+              '("article 响应缺少本次更新所需的编辑 token"))))
+  remote)
 
 (defun sspai--action-label (action)
   "Return a Chinese label for article ACTION."
@@ -1448,8 +1417,6 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
 
 (defun sspai--write-state (file state action)
   "Execute ACTION for FILE, always publishing its local content from STATE."
-  (unless (memq action '(community audit))
-    (user-error "sspai: 仅支持立即发布或投稿编辑部"))
   (let* ((status (plist-get state :status))
          (meta (plist-get state :meta))
          (raw-body (plist-get state :raw-body))
@@ -1459,12 +1426,9 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
        (concat
         "sspai: 远端文章不存在；不会沿用旧 ID 新建，"
         "请先在网页后台确认或另建源稿")))
-    (when (and remote (not (sspai--remote-editable-p remote)))
-      (user-error
-       "sspai: 远端 type=%s/free=%s 已锁定，不能更新"
-       (plist-get remote :type)
-       (if (plist-get remote :free) "true" "false")))
-    (sspai--validate-write-meta meta)
+    (when remote
+      (sspai--require-editable-article remote))
+    (sspai--required-string "title" (plist-get meta :title))
     (pcase-let* ((`(,html ,banner-pair)
                   (sspai--prepare-write-assets
                    file meta raw-body))
@@ -1473,7 +1437,8 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
         ;; Save the ID before follow-up requests so retries update this article.
         (setq remote (sspai--article-add
                       (sspai--article-add-payload meta html banner-pair))
-              meta (sspai--checkpoint-pushed file meta remote)))
+              meta (sspai--checkpoint-pushed file meta remote))
+        (sspai--require-editable-article remote))
       (let* ((saved (sspai--auto-save-confirmed remote title html))
              (payload (sspai--full-update-payload
                        saved meta html banner-pair action))

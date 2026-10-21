@@ -22,5 +22,8 @@
   limit; do not add a 2 MB recommendation threshold or warning.
 - Export body headings starting at h2; the article title occupies h1.
 - Require a non-empty title; do not add advisory title-length counters or warnings.
+- Validate inputs at entry points and newly received editing state before use.
+  Internal payload builders should trust validated data; retain checks for
+  source changes during network operations and ambiguous write results.
 - Run `make check` before publishing changes. Tests must stay offline and must
   not read real Firefox cookies or publish real articles.

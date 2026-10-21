@@ -340,7 +340,7 @@
        :type 'sspai-api-error)
       (should (= calls 1)))))
 
-(ert-deftest sspai-test-auto-save-payload-is-exact-and-requires-token ()
+(ert-deftest sspai-test-auto-save-payload-is-exact ()
   (let ((remote
          (sspai--normalize-article
           (sspai-test--article-object))))
@@ -354,14 +354,7 @@
           (token . "ARTICLE-TOKEN")
           (title_last . "Edited")
           (body_last . "<p>Edited</p>")
-          (update_at . 1234))))))
-  (let ((remote
-         (sspai--normalize-article
-          (sspai-test--article-object))))
-    (setf (plist-get remote :token) nil)
-    (should-error
-     (sspai--article-auto-save-payload remote "Edited" "<p>Edited</p>")
-     :type 'sspai-api-error)))
+          (update_at . 1234)))))))
 
 (ert-deftest sspai-test-full-update-preserves-standard-tags-and-unknown-fields ()
   (let* ((remote
@@ -420,22 +413,6 @@
                    "Published title"))
     (should (equal (alist-get 'body audit)
                    "<p>Published body</p>"))))
-
-(ert-deftest sspai-test-locked-or-paid-article-cannot-be-updated ()
-  (let ((meta (sspai-test--metadata "Local")))
-    (should-error
-     (sspai--full-update-payload
-      (sspai--normalize-article
-       (sspai-test--article-object 2))
-      meta "<p>Body</p>" nil 'community)
-     :type 'user-error)
-    (let ((object (sspai-test--article-object 5)))
-      (setf (alist-get 'free object) :json-false)
-      (should-error
-       (sspai--full-update-payload
-        (sspai--normalize-article object)
-        meta "<p>Body</p>" nil 'community)
-       :type 'user-error))))
 
 (ert-deftest sspai-test-firefox-token-is-url-scoped-and-refreshed ()
   (let ((calls 0))
@@ -949,14 +926,38 @@
        (should-not (string-match-p "BASE_HASH\\|SOURCE_HASH"
                                    (sspai-test--read-text file)))))))
 
-(ert-deftest sspai-test-server-locked-article-is-not-overwritten ()
-  (let* ((remote (sspai--normalize-article (sspai-test--article-object 2)))
-         (state (list :status 'tracked :meta (sspai-test--metadata "Local")
-                      :raw-body "Local body\n" :remote remote)))
-    (cl-letf (((symbol-function 'sspai--prepare-write-assets)
-               (lambda (&rest _) (ert-fail "uploaded assets for locked article"))))
-      (should-error (sspai--write-state "/tmp/offline-sspai-test.org" state 'community)
-                    :type 'user-error))))
+(ert-deftest sspai-test-invalid-remote-blocks-publication-before-assets ()
+  (dolist (change '((:type 2 user-error)
+                    (:free nil user-error)
+                    (:delete-status t user-error)
+                    (:token nil sspai-api-error)))
+    (let* ((remote (sspai--normalize-article (sspai-test--article-object 5)))
+           (state (list :status 'tracked :meta (sspai-test--metadata "Local")
+                        :raw-body "Local body\n" :remote remote)))
+      (setf (plist-get remote (car change)) (cadr change))
+      (cl-letf (((symbol-function 'sspai--prepare-write-assets)
+                 (lambda (&rest _) (ert-fail "uploaded assets for invalid article"))))
+        (should-error (sspai--write-state "/tmp/offline-sspai-test.org" state 'community)
+                      :type (caddr change))))))
+
+(ert-deftest sspai-test-auto-save-recovery-checks-new-remote-state ()
+  (let* ((remote (sspai--normalize-article (sspai-test--article-object 5)))
+         (fetched (copy-sequence remote)))
+    (cl-letf (((symbol-function 'sspai--article-auto-save)
+               (lambda (_) (signal 'sspai-api-error '("timeout"))))
+              ((symbol-function 'sspai--article-get) (lambda (_) fetched)))
+      (should (eq (sspai--auto-save-confirmed
+                   remote (plist-get remote :title) (plist-get remote :body))
+                  fetched))
+      (setf (plist-get fetched :type) 2)
+      (should-error (sspai--auto-save-confirmed
+                     remote (plist-get remote :title) (plist-get remote :body))
+                    :type 'user-error)
+      (setf (plist-get fetched :type) 5
+            (plist-get fetched :token) nil)
+      (should-error (sspai--auto-save-confirmed
+                     remote (plist-get remote :title) (plist-get remote :body))
+                    :type 'sspai-api-error))))
 
 (ert-deftest sspai-test-new-publish-checkpoints-id-before-follow-up-update ()
   (let* ((created
@@ -1069,10 +1070,10 @@
     (let ((file (concat (make-temp-name (expand-file-name "sspai-reject-"
                                                           temporary-file-directory))
                         suffix)))
-      (should-error (sspai--read-source file) :type 'user-error)
+      (with-temp-buffer
+        (setq buffer-file-name file)
+        (should-error (sspai-publish-community) :type 'user-error))
       (should-error (sspai--create-source file "Title")
-                    :type 'user-error)
-      (should-error (sspai--write-source file (sspai-test--metadata "Title"))
                     :type 'user-error)
       (should-not (file-exists-p file)))))
 
@@ -1109,11 +1110,15 @@
                    "#+begin_src emacs-lisp :exports both\n(message \"must not execute\")\n#+end_src\n")))
         (should (string-match-p "must not execute" html))))))
 
-(ert-deftest sspai-test-draft-action-is-rejected-before-any-write ()
+(ert-deftest sspai-test-empty-title-is-rejected-before-assets ()
   (cl-letf (((symbol-function 'sspai--prepare-write-assets)
-             (lambda (&rest _) (ert-fail "prepared assets for draft action"))))
-    (should-error (sspai--write-state "/tmp/article.org" nil 'draft)
-                  :type 'user-error)))
+             (lambda (&rest _) (ert-fail "prepared assets for empty title"))))
+    (dolist (title '(nil "" "   "))
+      (should-error
+       (sspai--write-state "/tmp/article.org"
+                           (list :status 'new :meta (list :title title))
+                           'community)
+       :type 'user-error))))
 
 (ert-deftest sspai-test-org-checkpoint-is-idempotent ()
   (sspai-test--with-temp-file
