@@ -1,6 +1,0 @@
-*.elc
-*~
-.#*
-\#*\#
-.dir-locals-2.el
-.deps/
