@@ -23,7 +23,7 @@
 
 Emacs 需要支持 SQLite（`M-: (sqlite-available-p)` 返回非 `nil`）。
 正文使用 Emacs 内置的 `ox-html` 导出，不需要外部转换工具。导出时不会
-执行 Org Babel 代码块。
+执行 Org Babel 代码块。文章标题使用 h1，正文标题固定从 h2 开始。
 
 ## 使用
 

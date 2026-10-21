@@ -1100,12 +1100,6 @@
               (should-not (string-match-p "<html\\|<head\\|table-of-contents\\|section-number" html)))))
       (delete-directory directory t))))
 
-(ert-deftest sspai-test-native-org-export-can-keep-heading-level ()
-  (let ((sspai-shift-heading-level nil))
-    (should (string-match-p
-             "<h1[^>]*>Heading</h1>"
-             (sspai--source-to-html "/tmp/article.org" "* Heading\nBody\n")))))
-
 (ert-deftest sspai-test-native-org-export-never-executes-babel ()
   (let ((org-export-use-babel t))
     (cl-letf (((symbol-function 'org-babel-execute-src-block)

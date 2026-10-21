@@ -89,12 +89,6 @@
   :type 'integer
   :group 'sspai)
 
-(defcustom sspai-shift-heading-level t
-  "When non-nil, shift source headings down one level for the article body.
-The article title occupies the page's h1, so source h1 headings become h2."
-  :type 'boolean
-  :group 'sspai)
-
 (defcustom sspai-title-width-limit 32
   "Displayed title width at which `sspai.el' warns before a write."
   :type 'integer
@@ -606,7 +600,7 @@ When ALLOW-EMPTY is nil, reject an explicitly empty value."
       (list :with-toc nil :section-numbers nil :with-title nil
             :with-author nil :with-date nil :html-inline-images t
             :html-doctype "html5" :html-html5-fancy t
-            :html-toplevel-hlevel (if sspai-shift-heading-level 2 1))))))
+            :html-toplevel-hlevel 2)))))
 
 (defun sspai--parse-html (html)
   "Parse HTML and return a DOM node."

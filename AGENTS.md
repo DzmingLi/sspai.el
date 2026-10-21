@@ -19,5 +19,6 @@
   text and formatting, and do not insert omitted optional settings.
 - Explicit publishing commands submit without a confirmation prompt. Always
   upload local body images; keep the recommended image size an internal constant.
+- Export body headings starting at h2; the article title occupies h1.
 - Run `make check` before publishing changes. Tests must stay offline and must
   not read real Firefox cookies or publish real articles.
