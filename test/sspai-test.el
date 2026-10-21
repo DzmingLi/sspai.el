@@ -926,8 +926,7 @@
                                 "<p>Local body</p>"))
                  (push 'update calls) remote))
               ((symbol-function 'sspai--checkpoint-pushed)
-               (lambda (&rest _) (push 'checkpoint calls)))
-              ((symbol-function 'sspai--confirm) (lambda (&rest _) nil)))
+               (lambda (&rest _) (push 'checkpoint calls))))
       (sspai--write-state "/tmp/offline-sspai-test.org" state 'community)
       ;; Even a second save and browser-side changes use local content.
       (setf (plist-get remote :title) "Edited in browser")
@@ -1009,9 +1008,7 @@
           (lambda (_file metadata remote)
             (push (if (= (plist-get remote :type) 4)
                       'interim-checkpoint 'final-checkpoint) calls)
-            (sspai-test--plist-with metadata :id (plist-get remote :id))))
-         ((symbol-function 'sspai--confirm)
-          (lambda (&rest _arguments) nil)))
+            (sspai-test--plist-with metadata :id (plist-get remote :id)))))
       (sspai--write-state
        "/tmp/offline-sspai-test.org"
        state 'community)
@@ -1174,7 +1171,6 @@
     (let* ((directory (make-temp-file "sspai-publish-" t))
            (file (expand-file-name "article.org" directory))
            (asset (expand-file-name "image.png" directory))
-           (sspai-confirm-before-write nil)
            (creates 0) (uploads 0) (fail-save t) remote)
       (unwind-protect
           (progn

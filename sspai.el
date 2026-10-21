@@ -84,26 +84,8 @@
   :type 'integer
   :group 'sspai)
 
-(defcustom sspai-confirm-before-write t
-  "When non-nil, ask before changing a remote SSPAI article."
-  :type 'boolean
-  :group 'sspai)
-
-(defcustom sspai-upload-local-images t
-  "When non-nil, upload local images referenced by article HTML."
-  :type 'boolean
-  :group 'sspai)
-
 (defcustom sspai-maximum-image-size (* 5 1024 1024)
   "Largest image, in bytes, that `sspai.el' will upload."
-  :type 'integer
-  :group 'sspai)
-
-(defcustom sspai-recommended-image-size (* 2 1024 1024)
-  "Image size above which `sspai.el' emits a quality warning.
-The web editor currently accepts files up to
-`sspai-maximum-image-size', while the official creation guide recommends
-keeping body images within 2 MB."
   :type 'integer
   :group 'sspai)
 
@@ -119,6 +101,9 @@ The article title occupies the page's h1, so source h1 headings become h2."
   :group 'sspai)
 
 ;;;; Constants and data structures
+
+(defconst sspai--recommended-image-size (* 2 1024 1024)
+  "Image size in bytes above which an upload emits a quality warning.")
 
 (defconst sspai--type-to-status
   '((0 . "featured")
@@ -754,12 +739,12 @@ Return `external' for an HTTP(S) reference."
        context
        (/ size 1048576.0)
        (/ sspai-maximum-image-size 1048576.0)))
-    (when (> size sspai-recommended-image-size)
+    (when (> size sspai--recommended-image-size)
       (message
        "sspai: %s 为 %.2f MB；官方建议图片控制在 %.2f MB 内"
        context
        (/ size 1048576.0)
-       (/ sspai-recommended-image-size 1048576.0)))))
+       (/ sspai--recommended-image-size 1048576.0)))))
 
 (defun sspai--multipart-escape (value)
   "Validate and return multipart header VALUE."
@@ -925,42 +910,40 @@ could not be persisted."
 BASE-DIR resolves relative paths.  CACHE maps SHA-256 to CDN URL.
 After each new upload, call CHECKPOINT so a later failure cannot cause a
 duplicate upload on retry."
-  (if (not sspai-upload-local-images)
-      html
-    (let* ((dom
-            (sspai--parse-html
-             (concat "<html><body>" html "</body></html>")))
-           (uploaded 0)
-           (cached 0)
-           (skipped 0))
-      (dolist (img (dom-by-tag dom 'img))
-        (let ((src (dom-attr img 'src)))
-          (unless (and (stringp src) (not (string-empty-p src)))
-            (user-error "sspai: <img> 缺少非空 src"))
-          (let ((pair (sspai--image-bytes-and-mime src base-dir)))
-            (if (eq pair 'external)
-                (cl-incf skipped)
-              (let* ((mime (car pair))
-                     (bytes (cdr pair))
-                     (hash (secure-hash 'sha256 bytes))
-                     (cached-url (gethash hash cache))
-                     (url
-                      (or
-                       (and cached-url
-                            (prog1 cached-url (cl-incf cached)))
-                       (let ((result
-                              (sspai--upload-image-bytes
-                               bytes mime "正文图片")))
-                         (cl-incf uploaded)
-                         (puthash hash (plist-get result :url) cache)
-                         (sspai--checkpoint-upload
-                          checkpoint (plist-get result :url))
-                         (plist-get result :url)))))
-                (setcdr (assq 'src (dom-attributes img)) url))))))
-      (message "sspai: 正文图片 %d 上传 / %d 缓存命中 / %d 外链保留"
-               uploaded cached skipped)
-      (let ((body (car (dom-by-tag dom 'body))))
-        (sspai--inner-html body)))))
+  (let* ((dom
+          (sspai--parse-html
+           (concat "<html><body>" html "</body></html>")))
+         (uploaded 0)
+         (cached 0)
+         (skipped 0))
+    (dolist (img (dom-by-tag dom 'img))
+      (let ((src (dom-attr img 'src)))
+        (unless (and (stringp src) (not (string-empty-p src)))
+          (user-error "sspai: <img> 缺少非空 src"))
+        (let ((pair (sspai--image-bytes-and-mime src base-dir)))
+          (if (eq pair 'external)
+              (cl-incf skipped)
+            (let* ((mime (car pair))
+                   (bytes (cdr pair))
+                   (hash (secure-hash 'sha256 bytes))
+                   (cached-url (gethash hash cache))
+                   (url
+                    (or
+                     (and cached-url
+                          (prog1 cached-url (cl-incf cached)))
+                     (let ((result
+                            (sspai--upload-image-bytes
+                             bytes mime "正文图片")))
+                       (cl-incf uploaded)
+                       (puthash hash (plist-get result :url) cache)
+                       (sspai--checkpoint-upload
+                        checkpoint (plist-get result :url))
+                       (plist-get result :url)))))
+              (setcdr (assq 'src (dom-attributes img)) url))))))
+    (message "sspai: 正文图片 %d 上传 / %d 缓存命中 / %d 外链保留"
+             uploaded cached skipped)
+    (let ((body (car (dom-by-tag dom 'body))))
+      (sspai--inner-html body))))
 
 (defun sspai--cdn-key-from-url (url)
   "Return SSPAI attachment key from CDN URL, or nil."
@@ -1402,11 +1385,6 @@ Only that status transition is allowed; every other requested field must match."
       (user-error "sspai: 源稿必须是本地可读写普通文件"))
     file))
 
-(defun sspai--confirm (prompt enabled)
-  "Ask PROMPT when ENABLED is non-nil."
-  (when (and enabled (not (yes-or-no-p prompt)))
-    (user-error "sspai: 已取消")))
-
 (defun sspai--publication-meta (meta remote)
   "Copy local META and record REMOTE identity and publication status only."
   (let ((updated (copy-sequence meta)))
@@ -1512,11 +1490,7 @@ Return (HTML BANNER-PAIR).  Every new upload is checkpointed immediately."
        "sspai: 远端 type=%s/free=%s 已锁定，不能更新"
        (plist-get remote :type)
        (if (plist-get remote :free) "true" "false")))
-    (let ((title (sspai--validate-write-meta meta)))
-      (sspai--confirm
-       (format "%s少数派文章《%s》？"
-               (sspai--action-label action) title)
-       sspai-confirm-before-write))
+    (sspai--validate-write-meta meta)
     (pcase-let* ((`(,html ,banner-pair)
                   (sspai--prepare-write-assets
                    file meta raw-body))

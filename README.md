@@ -29,6 +29,8 @@ Emacs 需要支持 SQLite（`M-: (sqlite-available-p)` 返回非 `nil`）。
 
 打开本地 `.org` 文件，写作后用 `C-x C-s` 保存，再选择发布方式：
 
+发布命令直接提交，不再二次确认；正文中的本地图片会自动上传。
+
 | 命令 | 行为 |
 | --- | --- |
 | `sspai-publish-community` | 立即发布到 Matrix 社区，已有文章则更新本地版本 |

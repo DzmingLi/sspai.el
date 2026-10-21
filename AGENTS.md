@@ -17,5 +17,7 @@
   fixed; do not add alternate credential providers or configurable API hosts.
 - Checkpoint only article identity/status and image caches. Preserve editorial
   text and formatting, and do not insert omitted optional settings.
+- Explicit publishing commands submit without a confirmation prompt. Always
+  upload local body images; keep the recommended image size an internal constant.
 - Run `make check` before publishing changes. Tests must stay offline and must
   not read real Firefox cookies or publish real articles.
