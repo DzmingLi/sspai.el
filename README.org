@@ -1,8 +1,20 @@
 #+TITLE: sspai.el
 #+OPTIONS: toc:nil num:nil
 
-从本地 Org 文件发布少数派文章。写作和保存都在本地完成，发布时通过
-=firefox-cookies.el= 使用 Firefox 中已有的登录状态。
+从本地 Org 文件发布少数派文章。写作和保存都在本地完成。
+
+自行配置 =sspai-cookie-function=，默认未配置。函数接收完整 HTTP(S) URL，
+返回 =((NAME . VALUE) ...)= 字符串键值对列表，其中需要包含登录 Cookie
+=sspai_jwt_token=。每次 API 请求都会调用该函数。
+
+例如，使用可选的 [[https://github.com/DzmingLi/firefox-cookies.el][firefox-cookies.el]] 读取 Firefox 登录状态：
+
+#+begin_src emacs-lisp
+(require 'sspai)
+(require 'firefox-cookies)
+(setq firefox-cookies-profile-directory "~/.config/mozilla/firefox/default/")
+(setq sspai-cookie-function #'firefox-cookies-get)
+#+end_src
 
 * 使用
 

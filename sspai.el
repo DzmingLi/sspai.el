@@ -5,7 +5,7 @@
 ;; Author: Dzming Li <i@dzming.li>
 ;; Maintainer: Dzming Li <i@dzming.li>
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "31.1") (firefox-cookies "0.1.0"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: convenience, hypermedia, tools
 ;; URL: https://github.com/DzmingLi/sspai.el
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -31,7 +31,8 @@
 ;; document's generic `banner' image, publish to the community,
 ;; submit for editorial review, and update existing articles from local sources.
 ;;
-;; Use `firefox-cookies' to read the explicitly configured Firefox login.
+;; Set `sspai-cookie-function' to a function that returns cookies for a URL.
+;; For example, users of firefox-cookies.el can set it to `firefox-cookies-get'.
 ;; Account Bearer, article editing, and Qiniu upload tokens stay in memory;
 ;; credentials are never written into source files.
 ;;
@@ -45,7 +46,6 @@
 
 (require 'cl-lib)
 (require 'dom)
-(require 'firefox-cookies)
 (require 'json)
 (require 'mailcap)
 (require 'org)
@@ -78,6 +78,13 @@
  "SSPAI image was uploaded but its local cache was not saved")
 
 ;;;; Customization
+
+(defcustom sspai-cookie-function nil
+  "Function used to obtain cookies for a URL.
+The function receives one absolute HTTP(S) URL and returns an alist of
+(NAME . VALUE) string pairs in transmission order."
+  :type '(choice (const :tag "未配置" nil) function)
+  :group 'sspai)
 
 (defcustom sspai-request-timeout 30
   "Timeout in seconds for one SSPAI or Qiniu HTTP request."
@@ -150,12 +157,15 @@ When ALLOW-ZERO is nil, require a positive integer."
   (concat "https://sspai.com/api/v1" path))
 
 (defun sspai--access-token (url)
-  "Read the Firefox login token for API URL without caching it."
-  (let* ((value (cdr (assoc "sspai_jwt_token" (firefox-cookies-get url))))
+  "Read the login token for API URL using `sspai-cookie-function'."
+  (unless (functionp sspai-cookie-function)
+    (user-error "sspai-cookie-function 尚未配置"))
+  (let* ((value (cdr (assoc "sspai_jwt_token"
+                            (funcall sspai-cookie-function url))))
          (token (and (stringp value) (url-unhex-string value t))))
     (unless (and token (not (string-empty-p (string-trim token)))
                  (not (string-match-p "[\r\n]" token)))
-      (user-error "sspai: Firefox 登录 Cookie 无效或缺失，请在配置的 profile 中登录少数派"))
+      (user-error "sspai: Cookie 中的 sspai_jwt_token 无效或缺失"))
     (string-trim token)))
 
 ;;;; HTTP and API envelopes
