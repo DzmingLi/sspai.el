@@ -102,10 +102,9 @@ Bearer token。不会扫描或猜测 Firefox profile；容器可通过
 账户 token、单篇文章编辑 token 和七牛上传凭据只在内存中使用，不写入
 Org 文件。账户 Bearer 只发送到少数派 API，图片上传使用独立的七牛凭据。
 
-## 测试
+## 编译检查
 
-测试全部离线运行，不读取真实 Cookie，不发布文章。依赖已在 `load-path`
-中时运行：
+依赖已在 `load-path` 中时运行：
 
 ```sh
 make check
@@ -118,7 +117,7 @@ make check EMACSFLAGS='--batch -Q' \
   ELISP_PATH='/path/to/firefox-cookies.el'
 ```
 
-检查包括 ERT 测试和将编译警告视为错误的字节编译。GitHub Actions 使用
+检查执行字节编译，并将编译警告视为错误。GitHub Actions 使用
 最新版 Emacs 开发快照运行相同检查。
 
 ## 许可

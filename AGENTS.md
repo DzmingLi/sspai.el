@@ -25,5 +25,6 @@
 - Validate inputs at entry points and newly received editing state before use.
   Internal payload builders should trust validated data; retain checks for
   source changes during network operations and ambiguous write results.
-- Run `make check` before publishing changes. Tests must stay offline and must
-  not read real Firefox cookies or publish real articles.
+- Do not maintain a test suite. Run `make check` for strict byte compilation
+  before publishing changes. Checks must not read real Firefox cookies or
+  publish real articles.
