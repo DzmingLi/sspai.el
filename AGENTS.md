@@ -18,7 +18,8 @@
 - Checkpoint only article identity/status and image caches. Preserve editorial
   text and formatting, and do not insert omitted optional settings.
 - Explicit publishing commands submit without a confirmation prompt. Always
-  upload local body images; keep the recommended image size an internal constant.
+  upload local body images. Use one internal constant for the 5 MB image upload
+  limit; do not add a 2 MB recommendation threshold or warning.
 - Export body headings starting at h2; the article title occupies h1.
 - Run `make check` before publishing changes. Tests must stay offline and must
   not read real Firefox cookies or publish real articles.

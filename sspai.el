@@ -84,11 +84,6 @@
   :type 'integer
   :group 'sspai)
 
-(defcustom sspai-maximum-image-size (* 5 1024 1024)
-  "Largest image, in bytes, that `sspai.el' will upload."
-  :type 'integer
-  :group 'sspai)
-
 (defcustom sspai-title-width-limit 32
   "Displayed title width at which `sspai.el' warns before a write."
   :type 'integer
@@ -96,8 +91,8 @@
 
 ;;;; Constants and data structures
 
-(defconst sspai--recommended-image-size (* 2 1024 1024)
-  "Image size in bytes above which an upload emits a quality warning.")
+(defconst sspai--maximum-image-size (* 5 1024 1024)
+  "Maximum image upload size in bytes.")
 
 (defconst sspai--type-to-status
   '((0 . "featured")
@@ -725,20 +720,14 @@ Return `external' for an HTTP(S) reference."
     (concat uuid "." extension)))
 
 (defun sspai--check-image-size (bytes context)
-  "Validate BYTES size and warn for CONTEXT when above the recommendation."
+  "Reject image BYTES above the upload limit, identifying CONTEXT."
   (let ((size (string-bytes bytes)))
-    (when (> size sspai-maximum-image-size)
+    (when (> size sspai--maximum-image-size)
       (user-error
        "sspai: %s 大小 %.2f MB，超过 %.2f MB 上限"
        context
        (/ size 1048576.0)
-       (/ sspai-maximum-image-size 1048576.0)))
-    (when (> size sspai--recommended-image-size)
-      (message
-       "sspai: %s 为 %.2f MB；官方建议图片控制在 %.2f MB 内"
-       context
-       (/ size 1048576.0)
-       (/ sspai--recommended-image-size 1048576.0)))))
+       (/ sspai--maximum-image-size 1048576.0)))))
 
 (defun sspai--multipart-escape (value)
   "Validate and return multipart header VALUE."
