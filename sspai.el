@@ -84,12 +84,10 @@
   :type 'integer
   :group 'sspai)
 
-(defcustom sspai-title-width-limit 32
-  "Displayed title width at which `sspai.el' warns before a write."
-  :type 'integer
-  :group 'sspai)
-
 ;;;; Constants and data structures
+
+(defconst sspai--title-width-limit 32
+  "Title display width in columns above which publication emits a warning.")
 
 (defconst sspai--maximum-image-size (* 5 1024 1024)
   "Maximum image upload size in bytes.")
@@ -1415,10 +1413,10 @@ Only that status transition is allowed; every other requested field must match."
                        0)))
       (user-error
        "sspai: 开启利益相关声明时必须设置正整数 statement id"))
-    (when (> (string-width title) sspai-title-width-limit)
+    (when (> (string-width title) sspai--title-width-limit)
       (message
        "sspai: 标题显示宽度为 %d，超过建议值 %d"
-       (string-width title) sspai-title-width-limit))
+       (string-width title) sspai--title-width-limit))
     title))
 
 (defun sspai--prepare-write-assets (file meta raw-body)
