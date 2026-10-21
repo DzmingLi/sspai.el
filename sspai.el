@@ -86,8 +86,8 @@
 
 ;;;; Constants and data structures
 
-(defconst sspai--title-width-limit 32
-  "Title display width in columns above which publication emits a warning.")
+(defconst sspai--title-count-limit 32
+  "Title word count shown as the reference limit in the SSPAI web editor.")
 
 (defconst sspai--maximum-image-size (* 5 1024 1024)
   "Maximum image upload size in bytes.")
@@ -1400,6 +1400,38 @@ Only that status transition is allowed; every other requested field must match."
       "提交（少数派已转入审核，尚未公开）"
     (sspai--action-label action)))
 
+(defun sspai--title-word-count (title)
+  "Count TITLE using the SSPAI web editor's `calcWordCount' rules.
+Han characters and the editor's listed punctuation count as one.  ASCII letter
+and digit runs count separately: one character counts as half, longer runs as
+one.  Other UTF-16 code units count as a quarter; whitespace is ignored.
+Round the final total to the nearest integer, with halves rounded up.
+See https://static.sspai.com/static/js/write.e08ff89c.js."
+  (let ((case-fold-search nil)
+        (punctuation "！？｡＂＃＄％＆＇（）＊＋，－／：；＜＝＞＠［＼］＾＿｀｛｜｝～｟｠｢｣､、〃》「」『』【】〔〕〖〗〘〙〚〛〜〝〞〟〰〾〿–—‘’‛“”„‟…‧﹏")
+        ;; The JavaScript \s set, including BOM but excluding U+0085.
+        (whitespace "\t-\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+        (quarters 0))
+    (with-temp-buffer
+      (insert (replace-regexp-in-string "<[^>]+>\\|&nbsp;" " " title))
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((char (char-after)))
+          (cond
+           ((looking-at "[A-Za-z]+\\|[0-9]+")
+            (cl-incf quarters (if (= (- (match-end 0) (point)) 1) 2 4))
+            (goto-char (match-end 0)))
+           ((> (skip-chars-forward whitespace) 0))
+           (t
+            (cl-incf quarters
+                     (cond ((or (<= #x4e00 char #x9fff)
+                                (string-search (char-to-string char) punctuation))
+                            4)
+                           ((> char #xffff) 2) ; JavaScript uses surrogate pairs.
+                           (t 1)))
+            (forward-char))))))
+    (/ (+ quarters 2) 4)))
+
 (defun sspai--validate-write-meta (meta)
   "Validate user-editable META before any remote side effect."
   (let ((title
@@ -1413,10 +1445,10 @@ Only that status transition is allowed; every other requested field must match."
                        0)))
       (user-error
        "sspai: 开启利益相关声明时必须设置正整数 statement id"))
-    (when (> (string-width title) sspai--title-width-limit)
-      (message
-       "sspai: 标题显示宽度为 %d，超过建议值 %d"
-       (string-width title) sspai--title-width-limit))
+    (let ((count (sspai--title-word-count title)))
+      (when (> count sspai--title-count-limit)
+        (message "sspai: 标题字数为 %d，超过网页参考值 %d"
+                 count sspai--title-count-limit)))
     title))
 
 (defun sspai--prepare-write-assets (file meta raw-body)
