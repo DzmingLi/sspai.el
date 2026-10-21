@@ -4,28 +4,6 @@
 从本地 Org 文件发布少数派文章。写作和保存都在本地完成，发布时通过
 =firefox-cookies.el= 使用 Firefox 中已有的登录状态。
 
-* 安装
-
-只面向最新版 Emacs，不维护旧版本兼容；当前最低版本声明为 31.1。
-使用内置的 =package-vc-install= 安装：
-
-#+begin_src emacs-lisp
-(require 'package-vc)
-(package-vc-install "https://github.com/DzmingLi/firefox-cookies.el")
-(package-vc-install "https://github.com/DzmingLi/sspai.el")
-#+end_src
-
-配置 Firefox profile，然后在该 profile 中登录少数派：
-
-#+begin_src emacs-lisp
-(require 'sspai)
-(setq firefox-cookies-profile-directory "~/.config/mozilla/firefox/default/")
-#+end_src
-
-Emacs 需要支持 SQLite（=M-: (sqlite-available-p)= 返回非 =nil=）。
-正文使用 Emacs 内置的 =ox-html= 导出，不需要外部转换工具。导出时不会
-执行 Org Babel 代码块。文章标题使用 h1，正文标题固定从 h2 开始。
-
 * 使用
 
 打开本地 =.org= 文件，写作后用 =C-x C-s= 保存，再选择发布方式：
@@ -93,16 +71,3 @@ Org 图片链接（如 =[[file:./image.png]]=）和 =#+BANNER= 指定的本地�
 支持 PNG、JPEG、GIF，单张上限固定为 5 MB，超出会报错停止。每张图片上传
 成功后立即保存缓存；若图片已上传但本地缓存保存失败，错误会给出 CDN
 地址，修复本地文件后再继续。
-
-* 认证
-
-每次 API 请求通过 =firefox-cookies-get= 读取 =sspai_jwt_token=，转换为
-Bearer token。不会扫描或猜测 Firefox profile；容器可通过
-=firefox-cookies-origin-attributes= 选择。
-
-账户 token、单篇文章编辑 token 和七牛上传凭据只在内存中使用，不写入
-Org 文件。账户 Bearer 只发送到少数派 API，图片上传使用独立的七牛凭据。
-
-* 许可
-
-GPL-3.0-or-later。许可证声明见 sspai.el 文件头部。
