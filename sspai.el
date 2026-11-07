@@ -32,7 +32,7 @@
 ;; submit for editorial review, and update existing articles from local sources.
 ;;
 ;; Set `sspai-cookie-function' to a function that returns cookies for a URL.
-;; For example, users of firefox-cookies.el can set it to `firefox-cookies-get'.
+;; For example, users of Camulus can set it to `camulus-firefox-cookies-get'.
 ;; Account Bearer, article editing, and Qiniu upload tokens stay in memory;
 ;; credentials are never written into source files.
 ;;
